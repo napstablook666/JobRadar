@@ -1,0 +1,14 @@
+本轮修改产物
+
+src/main/java/com/getjobs/worker/liepin/Liepin.java
+src/main/java/com/getjobs/application/service/AiService.java
+src/main/java/com/getjobs/worker/service/LiepinJobService.java
+front/app/liepin/page.tsx
+src/test/java/com/getjobs/worker/liepin/LiepinBatchDeliveryGuardTest.java
+进度白板.md
+
+行为变化
+- PreparedJob 只保存 jobId、卡片索引和岗位数据，不再保存 Locator。
+- 批量发送前按 jobId 重新定位卡片和聊一聊按钮，索引只作回退。
+- 页面重定位、按钮失效、点击异常和聊天确认失败返回 RETRY，不保存当前页完成进度。
+- AI 超时、结果无效和按钮失效通过状态接口与猎聘页独立显示。

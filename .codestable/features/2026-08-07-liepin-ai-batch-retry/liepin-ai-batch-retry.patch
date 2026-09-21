@@ -1,0 +1,524 @@
+diff --git "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__main__java__com__getjobs__worker__service__LiepinJobService.java" b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+index 0c158b0..25ec75e 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__main__java__com__getjobs__worker__service__LiepinJobService.java"
++++ b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+@@ -42,6 +42,18 @@ public class LiepinJobService implements JobPlatformService {
+         FAILED
+     }
+ 
++    private enum RetryMode {
++        NORMAL,
++        AI_SINGLE,
++        AI_BATCH
++    }
++
++    enum BatchRetryAction {
++        COMPLETE,
++        CONTINUE,
++        PAUSE
++    }
++
+     private final PlaywrightManager playwrightManager;
+     private final ConfigService configService;
+     private final ObjectProvider<Liepin> liepinProvider;
+@@ -68,6 +80,12 @@ public class LiepinJobService implements JobPlatformService {
+     private volatile CompletableFuture<Liepin.GreetingAction> pendingDecision;
+     private volatile Consumer<JobProgressMessage> activeProgressCallback;
+     private volatile Map<String, Object> aiSummary = emptyAiSummary();
++    private volatile RetryMode retryMode = RetryMode.NORMAL;
++    private volatile int batchRetryRound = 0;
++    private volatile int batchRetryInitialPending = 0;
++    private volatile int batchRetryRemaining = 0;
++    private volatile int batchRetryDelivered = 0;
++    private volatile String batchRetryReason = "";
+ 
+     private static Map<String, Object> emptyDeliverySummary() {
+         return Map.of(
+@@ -169,6 +187,33 @@ public class LiepinJobService implements JobPlatformService {
+                         deliveredCount, suffix));
+     }
+ 
++    static BatchRetryAction decideBatchRetry(int previousPending, int currentPending,
++                                             Liepin.ExecutionOutcome outcome) {
++        if (outcome != Liepin.ExecutionOutcome.COMPLETED) {
++            return BatchRetryAction.PAUSE;
++        }
++        if (currentPending == 0) {
++            return BatchRetryAction.COMPLETE;
++        }
++        return currentPending < previousPending ? BatchRetryAction.CONTINUE : BatchRetryAction.PAUSE;
++    }
++
++    static JobProgressMessage buildBatchRetryCompletionMessage(int deliveredCount, int rounds) {
++        if (deliveredCount > 0) {
++            return JobProgressMessage.success(PLATFORM,
++                    String.format("AI超时岗位批量重试完成，共发起%d个聊天，执行%d轮", deliveredCount, rounds));
++        }
++        return JobProgressMessage.warning(PLATFORM,
++                String.format("AI超时岗位批量重试完成，本轮没有新增聊天，执行%d轮", rounds));
++    }
++
++    static JobProgressMessage buildBatchRetryPausedMessage(int deliveredCount, int remaining, String reason) {
++        String suffix = reason == null || reason.isBlank() ? "" : "：" + reason;
++        return JobProgressMessage.warning(PLATFORM,
++                String.format("AI超时批量重试已暂停，剩余%d个，累计发起%d个聊天%s",
++                        remaining, deliveredCount, suffix));
++    }
++
+     @Override
+     public void executeDelivery(Consumer<JobProgressMessage> progressCallback) {
+         if (!claimRun(progressCallback)) {
+@@ -180,7 +225,12 @@ public class LiepinJobService implements JobPlatformService {
+ 
+     /** 原子占用运行状态后异步执行，避免快速连续点击产生双任务。 */
+     public boolean startDeliveryAsync(Consumer<JobProgressMessage> progressCallback) {
+-        if (!claimRun(progressCallback)) {
++        return startDeliveryAsync(progressCallback, RetryMode.NORMAL, 0);
++    }
++
++    private boolean startDeliveryAsync(Consumer<JobProgressMessage> progressCallback,
++                                       RetryMode mode, int initialPending) {
++        if (!claimRun(progressCallback, mode, initialPending)) {
+             return false;
+         }
+         CompletableFuture.runAsync(() -> runClaimed(progressCallback));
+@@ -189,13 +239,28 @@ public class LiepinJobService implements JobPlatformService {
+ 
+     /** 重新跑保留页，专门处理上一轮耗尽自动重试的 AI 超时岗位。 */
+     public boolean retryAiTimeoutsAsync(Consumer<JobProgressMessage> progressCallback) {
+-        if (isRunning || number(aiSummary, "aiRetryable") < 1) {
++        int pending = number(aiSummary, "aiRetryable");
++        if (isRunning || pending < 1) {
++            return false;
++        }
++        return startDeliveryAsync(progressCallback, RetryMode.AI_SINGLE, pending);
++    }
++
++    /** 连续处理 AI 超时待重试岗位，直到清空或本轮没有进展。 */
++    public boolean retryAiTimeoutsBatchAsync(Consumer<JobProgressMessage> progressCallback) {
++        int pending = number(aiSummary, "aiRetryable");
++        if (isRunning || pending < 1) {
+             return false;
+         }
+-        return startDeliveryAsync(progressCallback);
++        return startDeliveryAsync(progressCallback, RetryMode.AI_BATCH, pending);
+     }
+ 
+     private synchronized boolean claimRun(Consumer<JobProgressMessage> progressCallback) {
++        return claimRun(progressCallback, RetryMode.NORMAL, 0);
++    }
++
++    private synchronized boolean claimRun(Consumer<JobProgressMessage> progressCallback,
++                                          RetryMode mode, int initialPending) {
+         if (isRunning) {
+             return false;
+         }
+@@ -207,6 +272,20 @@ public class LiepinJobService implements JobPlatformService {
+         aiSummary = emptyAiSummary();
+         deliverySummary = emptyDeliverySummary();
+         lastDeliveredCount = 0;
++        retryMode = mode;
++        if (mode == RetryMode.AI_BATCH) {
++            batchRetryRound = 0;
++            batchRetryInitialPending = initialPending;
++            batchRetryRemaining = initialPending;
++            batchRetryDelivered = 0;
++            batchRetryReason = "";
++        } else {
++            batchRetryRound = 0;
++            batchRetryInitialPending = 0;
++            batchRetryRemaining = 0;
++            batchRetryDelivered = 0;
++            batchRetryReason = "";
++        }
+         recentStatus.clear();
+         publish(progressCallback, JobProgressMessage.info(PLATFORM, "正在初始化投递任务..."));
+         return true;
+@@ -267,6 +346,11 @@ public class LiepinJobService implements JobPlatformService {
+             Liepin activeLiepin = liepin;
+             liepin.setStatsChangedCallback(() -> refreshRunStats(activeLiepin));
+ 
++            if (retryMode == RetryMode.AI_BATCH) {
++                executeBatchRetryRounds(progressCallback, liepin, config);
++                return;
++            }
++
+             Liepin.ExecutionResult executionResult = liepin.execute();
+             int deliveredCount = executionResult.deliveredCount();
+             lastDeliveredCount = deliveredCount;
+@@ -302,6 +386,93 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private void executeBatchRetryRounds(Consumer<JobProgressMessage> progressCallback,
++                                         Liepin liepin, LiepinConfig config) {
++        int previousPending = Math.max(1, batchRetryInitialPending);
++        int totalDelivered = 0;
++
++        while (true) {
++            if (shouldStop()) {
++                batchRetryReason = "收到停止指令";
++                taskState = TaskState.PAUSED;
++                publish(progressCallback, buildBatchRetryPausedMessage(
++                        totalDelivered, batchRetryRemaining, batchRetryReason));
++                return;
++            }
++
++            batchRetryRound++;
++            publish(progressCallback, JobProgressMessage.info(PLATFORM,
++                    String.format("开始 AI 超时批量重试第%d轮，当前待重试%d个",
++                            batchRetryRound, previousPending)));
++
++            Liepin.ExecutionResult result = liepin.execute();
++            totalDelivered += result.deliveredCount();
++            batchRetryDelivered = totalDelivered;
++            lastDeliveredCount = totalDelivered;
++            refreshRunStats(liepin);
++
++            int currentPending = number(aiSummary, "aiRetryable");
++            batchRetryRemaining = currentPending;
++            BatchRetryAction action = decideBatchRetry(previousPending, currentPending, result.outcome());
++            if (action == BatchRetryAction.COMPLETE) {
++                taskState = TaskState.COMPLETED;
++                batchRetryReason = "已清空待重试岗位";
++                publish(progressCallback, buildBatchRetryCompletionMessage(totalDelivered, batchRetryRound));
++                return;
++            }
++
++            if (action == BatchRetryAction.PAUSE) {
++                batchRetryReason = result.outcome() == Liepin.ExecutionOutcome.RATE_LIMITED
++                        ? result.detail()
++                        : currentPending >= previousPending
++                        ? "本轮待重试数量没有下降"
++                        : "任务已暂停";
++                taskState = TaskState.PAUSED;
++                if (result.outcome() == Liepin.ExecutionOutcome.RATE_LIMITED) {
++                    publish(progressCallback, JobProgressMessage.error(PLATFORM,
++                            String.format("AI超时批量重试因平台风控或节奏中断，剩余%d个，累计发起%d个聊天：%s",
++                                    currentPending, totalDelivered, batchRetryReason)));
++                } else {
++                    publish(progressCallback, buildBatchRetryPausedMessage(
++                            totalDelivered, currentPending, batchRetryReason));
++                }
++                return;
++            }
++
++            previousPending = currentPending;
++            int delaySeconds = config.effectiveAiTimeoutRetryDelaySeconds() * batchRetryRound;
++            if (delaySeconds > 0) {
++                publish(progressCallback, JobProgressMessage.info(PLATFORM,
++                        String.format("第%d轮完成本轮%d个聊天，剩余%d个，等待%d秒后继续",
++                                batchRetryRound, result.deliveredCount(), currentPending, delaySeconds)));
++                if (!waitForBatchRetryDelay(delaySeconds)) {
++                    batchRetryReason = "收到停止指令";
++                    taskState = TaskState.PAUSED;
++                    publish(progressCallback, buildBatchRetryPausedMessage(
++                            totalDelivered, currentPending, batchRetryReason));
++                    return;
++                }
++            }
++        }
++    }
++
++    private boolean waitForBatchRetryDelay(int delaySeconds) {
++        long deadline = System.currentTimeMillis() + delaySeconds * 1000L;
++        while (System.currentTimeMillis() < deadline) {
++            if (shouldStop()) {
++                return false;
++            }
++            long remaining = deadline - System.currentTimeMillis();
++            try {
++                Thread.sleep(Math.min(250L, Math.max(1L, remaining)));
++            } catch (InterruptedException interrupted) {
++                Thread.currentThread().interrupt();
++                return false;
++            }
++        }
++        return true;
++    }
++
+     void refreshRunStats(Liepin liepin) {
+         if (liepin == null) {
+             return;
+@@ -351,6 +522,15 @@ public class LiepinJobService implements JobPlatformService {
+         status.put("isRunning", isRunning);
+         status.put("taskState", taskState.name());
+         status.put("lastDeliveredCount", lastDeliveredCount);
++        status.put("retryMode", retryMode.name());
++        Map<String, Object> batchRetry = new HashMap<>();
++        batchRetry.put("active", isRunning && retryMode == RetryMode.AI_BATCH);
++        batchRetry.put("round", batchRetryRound);
++        batchRetry.put("initialPending", batchRetryInitialPending);
++        batchRetry.put("remaining", batchRetryRemaining);
++        batchRetry.put("delivered", batchRetryDelivered);
++        batchRetry.put("reason", batchRetryReason);
++        status.put("batchRetry", batchRetry);
+         status.put("resumeAvailable", taskState == TaskState.PAUSED || taskState == TaskState.FAILED
+                 || number(aiSummary, "aiRetryable") > 0);
+         status.put("isLoggedIn", playwrightManager.isLoggedIn(PLATFORM));
+diff --git "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__main__java__com__getjobs__application__controller__LiepinController.java" b/src/main/java/com/getjobs/application/controller/LiepinController.java
+index 5e7e3c2..af544fe 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__main__java__com__getjobs__application__controller__LiepinController.java"
++++ b/src/main/java/com/getjobs/application/controller/LiepinController.java
+@@ -139,6 +139,39 @@ public class LiepinController {
+         }
+     }
+ 
++    /** 连续处理上一轮因 AI 超时保留的岗位，直到清空或本轮没有进展。 */
++    @PostMapping("/retry-ai-batch")
++    public ResponseEntity<Map<String, Object>> retryAiTimeoutsBatch() {
++        Map<String, Object> response = new HashMap<>();
++        try {
++            if (!playwrightManager.isLoggedIn("liepin")) {
++                response.put("success", false);
++                response.put("message", "请先登录猎聘");
++                response.put("status", "not_logged_in");
++                return ResponseEntity.badRequest().body(response);
++            }
++            boolean started = liepinJobService.retryAiTimeoutsBatchAsync(progressMessage ->
++                    log.info("[{}] {}", progressMessage.getPlatform(), progressMessage.getMessage()));
++            if (!started) {
++                response.put("success", false);
++                response.put("message", liepinJobService.isRunning()
++                        ? "猎聘任务正在运行，请等待当前任务结束"
++                        : "当前没有待重试的 AI 超时岗位");
++                return ResponseEntity.badRequest().body(response);
++            }
++            response.put("success", true);
++            response.put("message", "AI 超时岗位批量重试已启动");
++            response.put("status", "started");
++            response.put("runId", liepinJobService.getRunId());
++            return ResponseEntity.ok(response);
++        } catch (Exception e) {
++            log.error("启动猎聘 AI 批量重试失败", e);
++            response.put("success", false);
++            response.put("message", "启动 AI 批量重试失败: " + e.getMessage());
++            return ResponseEntity.internalServerError().body(response);
++        }
++    }
++
+     /**
+      * 停止猎聘任务
+      * @return 响应结果
+diff --git "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\front__app__liepin__page.tsx" b/front/app/liepin/page.tsx
+index 17b3288..e2ce43a 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\front__app__liepin__page.tsx"
++++ b/front/app/liepin/page.tsx
+@@ -100,6 +100,15 @@ interface AiSummary {
+   avgLatencyMs?: number
+ }
+ 
++interface BatchRetryStatus {
++  active?: boolean
++  round?: number
++  initialPending?: number
++  remaining?: number
++  delivered?: number
++  reason?: string
++}
++
+ const EMPTY_AI_SUMMARY: AiSummary = {
+   candidateCount: 0,
+   cacheHits: 0,
+@@ -127,6 +136,15 @@ const EMPTY_DELIVERY_SUMMARY: DeliverySummary = {
+   delivered: 0,
+ }
+ 
++const EMPTY_BATCH_RETRY: BatchRetryStatus = {
++  active: false,
++  round: 0,
++  initialPending: 0,
++  remaining: 0,
++  delivered: 0,
++  reason: '',
++}
++
+ interface LiepinOption {
+   id: number
+   type: string
+@@ -186,6 +204,7 @@ export default function LiepinPage() {
+   ])
+   const [aiSummary, setAiSummary] = useState<AiSummary>(EMPTY_AI_SUMMARY)
+   const [deliverySummary, setDeliverySummary] = useState<DeliverySummary>(EMPTY_DELIVERY_SUMMARY)
++  const [batchRetry, setBatchRetry] = useState<BatchRetryStatus>(EMPTY_BATCH_RETRY)
+   const statusLogRef = useRef<HTMLDivElement>(null)
+   const activeRunIdRef = useRef(0)
+   const [pendingGreeting, setPendingGreeting] = useState<PendingGreeting | null>(null)
+@@ -404,6 +423,7 @@ export default function LiepinPage() {
+       }
+       setAiSummary({ ...EMPTY_AI_SUMMARY, ...(data.aiSummary || {}) })
+       setDeliverySummary({ ...EMPTY_DELIVERY_SUMMARY, ...(data.deliverySummary || {}) })
++      setBatchRetry({ ...EMPTY_BATCH_RETRY, ...(data.batchRetry || {}) })
+       setPendingGreeting(data.pendingGreeting || null)
+       return data
+     } catch (error) {
+@@ -498,6 +518,7 @@ export default function LiepinPage() {
+       setRecentTaskMessages([{ type: 'info', message: '正在启动投递任务...' }])
+       setAiSummary({ ...EMPTY_AI_SUMMARY })
+       setDeliverySummary({ ...EMPTY_DELIVERY_SUMMARY })
++      setBatchRetry({ ...EMPTY_BATCH_RETRY })
+       setPendingGreeting(null)
+       const response = await fetch('http://localhost:8888/api/liepin/start', {
+         method: 'POST',
+@@ -555,6 +576,36 @@ export default function LiepinPage() {
+     }
+   }
+ 
++  const handleBatchRetryAiTimeouts = async () => {
++    try {
++      setIsDelivering(true)
++      setTaskMessage('正在批量重试 AI 超时岗位...')
++      setTaskMessageType('info')
++      const response = await fetch('http://localhost:8888/api/liepin/retry-ai-batch', {
++        method: 'POST',
++      })
++      const data = await response.json()
++      if (!data.success) {
++        setIsDelivering(false)
++        setTaskMessage(data.message || '启动 AI 批量重试失败。')
++        setTaskMessageType('error')
++        return
++      }
++      const startedRunId = Number(data.runId || 0)
++      if (startedRunId > activeRunIdRef.current) {
++        activeRunIdRef.current = startedRunId
++      }
++      setTaskMessage(data.message || 'AI 超时岗位批量重试已启动。')
++      setTaskMessageType('info')
++      await refreshTaskStatus()
++    } catch (error) {
++      console.error('[猎聘] 启动 AI 批量重试失败:', error)
++      setIsDelivering(false)
++      setTaskMessage('启动 AI 批量重试失败：网络或服务异常。')
++      setTaskMessageType('error')
++    }
++  }
++
+   const handleStopDelivery = async () => {
+     try {
+       const response = await fetch('http://localhost:8888/api/liepin/stop', {
+@@ -632,9 +683,14 @@ export default function LiepinPage() {
+                   <BiPlay className="mr-1" /> 开始投递
+                 </Button>
+                 {(aiSummary.aiRetryable ?? 0) > 0 && (
+-                  <Button onClick={handleRetryAiTimeouts} size="sm" variant="outline" className="rounded-full border-amber-400 text-amber-700 hover:bg-amber-50 px-4">
+-                    <BiRefresh className="mr-1" /> 重试 AI 超时 ({aiSummary.aiRetryable})
+-                  </Button>
++                  <>
++                    <Button onClick={handleBatchRetryAiTimeouts} size="sm" className="rounded-full bg-amber-500 text-white hover:bg-amber-600 px-4">
++                      <BiRefresh className="mr-1" /> 一键批量重试 ({aiSummary.aiRetryable})
++                    </Button>
++                    <Button onClick={handleRetryAiTimeouts} size="sm" variant="outline" className="rounded-full border-amber-400 text-amber-700 hover:bg-amber-50 px-4">
++                      <BiRefresh className="mr-1" /> 重试一轮
++                    </Button>
++                  </>
+                 )}
+               </div>
+             )}
+@@ -722,6 +778,11 @@ export default function LiepinPage() {
+           <span>待重试 {aiSummary.aiRetryable ?? 0}</span>
+           <span>结果无效 {aiSummary.invalidResults ?? aiSummary.invalid ?? 0}</span>
+           <span>按钮失效 {aiSummary.buttonFailures ?? 0}</span>
++          {batchRetry.round && batchRetry.round > 0 && (
++            <span>
++              批量重试第 {batchRetry.round} 轮{batchRetry.active ? '进行中' : '已收尾'}，剩余 {batchRetry.remaining ?? aiSummary.aiRetryable ?? 0}，累计成功聊天 {batchRetry.delivered ?? 0}
++            </span>
++          )}
+         </div>
+       </div>
+ 
+diff --git "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__test__java__com__getjobs__worker__service__LiepinJobServiceDeliveryTest.java" b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+index 1a22733..bba98ff 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__test__java__com__getjobs__worker__service__LiepinJobServiceDeliveryTest.java"
++++ b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+@@ -127,4 +127,33 @@ class LiepinJobServiceDeliveryTest {
+         assertEquals(7, deliverySummary.get("scanned"));
+         assertEquals(1, deliverySummary.get("delivered"));
+     }
++
++    @Test
++    void batchRetryContinuesOnlyWhenPendingCountDrops() {
++        assertEquals(LiepinJobService.BatchRetryAction.CONTINUE,
++                LiepinJobService.decideBatchRetry(3, 2, Liepin.ExecutionOutcome.COMPLETED));
++        assertEquals(LiepinJobService.BatchRetryAction.COMPLETE,
++                LiepinJobService.decideBatchRetry(2, 0, Liepin.ExecutionOutcome.COMPLETED));
++        assertEquals(LiepinJobService.BatchRetryAction.PAUSE,
++                LiepinJobService.decideBatchRetry(2, 2, Liepin.ExecutionOutcome.COMPLETED));
++        assertEquals(LiepinJobService.BatchRetryAction.PAUSE,
++                LiepinJobService.decideBatchRetry(2, 3, Liepin.ExecutionOutcome.COMPLETED));
++    }
++
++    @Test
++    void batchRetryPausesAfterWorkerPauseOrRateLimit() {
++        assertEquals(LiepinJobService.BatchRetryAction.PAUSE,
++                LiepinJobService.decideBatchRetry(3, 1, Liepin.ExecutionOutcome.USER_PAUSED));
++        assertEquals(LiepinJobService.BatchRetryAction.PAUSE,
++                LiepinJobService.decideBatchRetry(3, 1, Liepin.ExecutionOutcome.RATE_LIMITED));
++    }
++
++    @Test
++    void batchRetryCompletionAndPauseMessagesExposeTheRemainingWork() {
++        assertEquals("success", LiepinJobService.buildBatchRetryCompletionMessage(2, 2).getType());
++        assertEquals("warning", LiepinJobService.buildBatchRetryPausedMessage(1, 2, "本轮待重试数量没有下降").getType());
++        org.junit.jupiter.api.Assertions.assertTrue(
++                LiepinJobService.buildBatchRetryPausedMessage(1, 2, "本轮待重试数量没有下降")
++                        .getMessage().contains("剩余2个"));
++    }
+ }
+diff --git "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__test__java__com__getjobs__application__controller__LiepinControllerPendingCleanupTest.java" b/src/test/java/com/getjobs/application/controller/LiepinControllerPendingCleanupTest.java
+index 429c5e3..44c4b95 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-ai-batch-retry\\baseline\\src__test__java__com__getjobs__application__controller__LiepinControllerPendingCleanupTest.java"
++++ b/src/test/java/com/getjobs/application/controller/LiepinControllerPendingCleanupTest.java
+@@ -1,6 +1,7 @@
+ package com.getjobs.application.controller;
+ 
+ import com.getjobs.application.service.LiepinService;
++import com.getjobs.worker.manager.PlaywrightManager;
+ import com.getjobs.worker.service.LiepinJobService;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
+@@ -13,6 +14,7 @@ import java.util.Map;
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.any;
+ import static org.mockito.Mockito.verify;
+ import static org.mockito.Mockito.when;
+ 
+@@ -21,14 +23,17 @@ class LiepinControllerPendingCleanupTest {
+     private LiepinController controller;
+     private LiepinJobService jobService;
+     private LiepinService liepinService;
++    private PlaywrightManager playwrightManager;
+ 
+     @BeforeEach
+     void setUp() {
+         controller = new LiepinController();
+         jobService = mock(LiepinJobService.class);
+         liepinService = mock(LiepinService.class);
++        playwrightManager = mock(PlaywrightManager.class);
+         ReflectionTestUtils.setField(controller, "liepinJobService", jobService);
+         ReflectionTestUtils.setField(controller, "liepinService", liepinService);
++        ReflectionTestUtils.setField(controller, "playwrightManager", playwrightManager);
+     }
+ 
+     @Test
+@@ -69,4 +74,18 @@ class LiepinControllerPendingCleanupTest {
+         assertEquals(1L, response.getBody().get("delivered"));
+         assertEquals(2L, response.getBody().get("pending"));
+     }
++
++    @Test
++    void batchRetryEndpointStartsTheBatchRun() {
++        when(playwrightManager.isLoggedIn("liepin")).thenReturn(true);
++        when(jobService.retryAiTimeoutsBatchAsync(any())).thenReturn(true);
++        when(jobService.getRunId()).thenReturn(7L);
++
++        ResponseEntity<Map<String, Object>> response = controller.retryAiTimeoutsBatch();
++
++        assertEquals(HttpStatus.OK, response.getStatusCode());
++        assertTrue((Boolean) response.getBody().get("success"));
++        assertEquals("started", response.getBody().get("status"));
++        assertEquals(7L, response.getBody().get("runId"));
++    }
+ }

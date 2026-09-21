@@ -1,0 +1,13 @@
+本次变更文件：
+- src/main/java/com/getjobs/worker/service/LiepinJobService.java
+- src/main/java/com/getjobs/application/controller/LiepinController.java
+- front/app/liepin/page.tsx
+- src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+- src/test/java/com/getjobs/application/controller/LiepinControllerPendingCleanupTest.java
+
+新增行为：
+- 增加 `POST /api/liepin/retry-ai-batch`。
+- 批量重试在同一个任务生命周期内连续运行，待重试数量下降时进入下一轮。
+- 待重试数量归零后完成；一轮没有进展、用户停止、风控或任务异常时保留剩余状态并暂停。
+- 页面增加“一键批量重试”入口、批量轮次和剩余数量展示。
+- 现有单轮 `POST /api/liepin/retry-ai` 与停止接口继续复用。

@@ -1,0 +1,152 @@
+diff --git a/src/main/java/com/getjobs/application/service/Job51Service.java b/src/main/java/com/getjobs/application/service/Job51Service.java
+index ed9b31d..e746d18 100644
+--- a/src/main/java/com/getjobs/application/service/Job51Service.java
++++ b/src/main/java/com/getjobs/application/service/Job51Service.java
+@@ -477,7 +477,7 @@ public class Job51Service {
+                 entity.setJobId(jobId);
+                 entity.setJobTitle(readFirstText(item, "jobName", "jobTitle", "title"));
+                 entity.setJobDescription(readFirstText(item,
+-                        "jobDescription", "jobDesc", "postDescription", "description",
++                        "jobDescribe", "jobDescription", "jobDesc", "postDescription", "description",
+                         "jobIntro", "jobDuty", "jobRequirement", "requirement"));
+                 entity.setJobSalaryText(readFirstText(item,
+                         "provideSalaryString", "salaryDesc", "salary", "salaryText"));
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51.java b/src/main/java/com/getjobs/worker/job51/Job51.java
+index 0ed5fcd..986df2e 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51.java
+@@ -673,19 +673,34 @@ public class Job51 {
+                 return AiJobOutcome.SKIPPED;
+             }
+ 
++            JobDescriptionResult description = resolveJobDescription(null, entity.getJobDescription());
++            AiGreetingResult aiResult = null;
++            if (description.usable()) {
++                aiProcessedCount++;
++                aiResult = generateAiGreeting(keyword, title, description.text());
++                if (!isUsableAiGreeting(aiResult)) {
++                    return skipInvalidAiGreeting(entity.getJobId(), title, aiResult);
++                }
++            }
++
+             detailPage = page.context().newPage();
+             detailPage.setDefaultTimeout(10000);
+             if (!navigateDetailPage(detailPage, entity.getJobId(), link)) {
+                 boolean accessBlocked = checkAccessVerification(detailPage) || checkNeedLogin(detailPage);
+                 String reason = accessBlocked ? "detail_blocked" : "detail_navigation_failed";
+-                if (accessBlocked) {
+-                    sendProgress(String.format("详情页受验证影响，尝试搜索页投递：%s", title), null, null);
++                if (description.usable() || accessBlocked) {
++                    String fallbackMessage = description.usable()
++                            ? "详情页未就绪，使用搜索快照 JD 尝试搜索页投递"
++                            : "详情页受验证影响，尝试搜索页投递";
++                    sendProgress(String.format("%s：%s", fallbackMessage, title), null, null);
+                     if (applySingleJobFromSearchPage(searchCard, cardIndex, entity.getJobId(), company, title)) {
+                         job51Service.updateGreetingState(entity.getJobId(), Job51Service.GREETING_SKIPPED,
+                                 "apply_only_no_chat");
+-                        aiProcessedCount++;
++                        if (!description.usable()) aiProcessedCount++;
+                         return AiJobOutcome.DELIVERED;
+                     }
++                }
++                if (accessBlocked) {
+                     detailAccessBlocked = true;
+                     markGreetingSkipped(entity.getJobId(), reason);
+                     sendProgress(String.format("跳过%s：详情页加载失败（%s，搜索页回退也未确认）", title, reason), null, null);
+@@ -696,29 +711,26 @@ public class Job51 {
+                 return AiJobOutcome.SKIPPED;
+             }
+ 
+-            JobDescriptionResult description = resolveJobDescription(detailPage, entity.getJobDescription());
+             if (!description.usable()) {
+-                markGreetingSkipped(entity.getJobId(), description.reason());
+-                sendProgress(String.format("跳过%s：岗位JD获取失败（%s）", title, description.reason()), null, null);
+-                return AiJobOutcome.SKIPPED;
+-            }
+-            String jd = description.text();
+-            if (!jd.equals(normalizeJobDescription(entity.getJobDescription()))) {
+-                entity.setJobDescription(jd);
+-                job51Service.updateJobDescription(entity.getJobId(), jd);
+-                log.info("[51job] JD读取成功 job_id={}, source={}, length={}",
+-                        entity.getJobId(), description.source(), jd.length());
+-            }
++                description = resolveJobDescription(detailPage, entity.getJobDescription());
++                if (!description.usable()) {
++                    markGreetingSkipped(entity.getJobId(), description.reason());
++                    sendProgress(String.format("跳过%s：岗位JD获取失败（%s）", title, description.reason()), null, null);
++                    return AiJobOutcome.SKIPPED;
++                }
++                String jd = description.text();
++                if (!jd.equals(normalizeJobDescription(entity.getJobDescription()))) {
++                    entity.setJobDescription(jd);
++                    job51Service.updateJobDescription(entity.getJobId(), jd);
++                    log.info("[51job] JD读取成功 job_id={}, source={}, length={}",
++                            entity.getJobId(), description.source(), jd.length());
++                }
+ 
+-            aiProcessedCount++;
+-            AiGreetingResult aiResult = generateAiGreeting(keyword, title, jd);
+-            if (!isUsableAiGreeting(aiResult)) {
+-                String reason = aiResult == null || aiResult.reason() == null
+-                        ? "ai_response_invalid" : aiResult.reason();
+-                markGreetingSkipped(entity.getJobId(), reason);
+-                int attempts = aiResult == null ? 0 : aiResult.attempts();
+-                sendProgress(String.format("跳过%s：AI回复无效（%s，尝试%d次）", title, reason, attempts), null, null);
+-                return AiJobOutcome.SKIPPED;
++                aiProcessedCount++;
++                aiResult = generateAiGreeting(keyword, title, jd);
++                if (!isUsableAiGreeting(aiResult)) {
++                    return skipInvalidAiGreeting(entity.getJobId(), title, aiResult);
++                }
+             }
+ 
+             if (findVisibleTextAction(detailPage, Job51Locators.GREETING_TEXTS) != null
+@@ -757,6 +769,15 @@ public class Job51 {
+         job51Service.updateGreetingState(jobId, Job51Service.GREETING_SKIPPED, reason);
+     }
+ 
++    private AiJobOutcome skipInvalidAiGreeting(Long jobId, String title, AiGreetingResult aiResult) {
++        String reason = aiResult == null || aiResult.reason() == null
++                ? "ai_response_invalid" : aiResult.reason();
++        markGreetingSkipped(jobId, reason);
++        int attempts = aiResult == null ? 0 : aiResult.attempts();
++        sendProgress(String.format("跳过%s：AI回复无效（%s，尝试%d次）", title, reason, attempts), null, null);
++        return AiJobOutcome.SKIPPED;
++    }
++
+     private void waitBetweenAiJobs() {
+         int min = config.effectiveMinDelaySeconds();
+         int max = config.effectiveMaxDelaySeconds();
+@@ -1299,6 +1320,10 @@ public class Job51 {
+         if (isUsableJobDescription(cachedText)) {
+             return new JobDescriptionResult(cachedText, "cache", "ok");
+         }
++        if (detailPage == null) {
++            return new JobDescriptionResult(null, "none", "jd_missing");
++        }
++
+         long deadline = System.currentTimeMillis() + JD_WAIT_TIMEOUT_MS;
+         while (System.currentTimeMillis() < deadline) {
+             String dom = extractDescriptionFromDom(detailPage);
+diff --git a/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java b/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java
+index 90d02d0..0a1ee63 100644
+--- a/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java
++++ b/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java
+@@ -43,4 +43,17 @@ class Job51SearchJsonTest {
+         assertEquals("https://jobs.51job.com/all/2001.html", result.get(0).getJobLink());
+     }
+ 
++    @Test
++    void parsesLiveSearchDescriptionFieldBeforeLegacyAliases() {
++        List<Job51Entity> result = Job51Service.parseSearchEntities("""
++                {"resultbody":{"job":{"items":[
++                  {"jobId":"3001","jobName":"现场应用工程师",
++                   "jobDescribe":"负责设备安装、现场培训与客户技术支持",
++                   "description":"旧详情摘要","jobHref":"https://jobs.example.test/city/3001.html"}
++                ]}}}
++                """);
++
++        assertEquals(1, result.size());
++        assertEquals("负责设备安装、现场培训与客户技术支持", result.get(0).getJobDescription());
++    }
+ }

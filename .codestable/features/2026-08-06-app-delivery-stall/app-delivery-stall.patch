@@ -1,0 +1,2298 @@
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51.java b/src/main/java/com/getjobs/worker/job51/Job51.java
+index edb1a9b..104527c 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51.java
+@@ -41,6 +41,10 @@ public class Job51 {
+     @Setter
+     private Supplier<Boolean> shouldStopCallback;
+ 
++    /** 页面关闭或 CDP 重连后，由管理器提供新的可用 Page。 */
++    @Setter
++    private Supplier<Page> pageRecovery;
++
+     private final List<String> resultList = new ArrayList<>();
+     private final Job51Service job51Service;
+     private boolean networkHooked = false;
+@@ -48,6 +52,14 @@ public class Job51 {
+     private final java.util.Set<String> processedRequestIds = new java.util.HashSet<>();
+     @Getter
+     private int currentPageNum = 0;
++    @Getter
++    private String executionError;
++    @Getter
++    private String stopReason;
++    @Getter
++    private int selectedCount;
++    @Getter
++    private int confirmedSuccessCount;
+     // 当前页从JSON拦截到的jobId列表
+     private final java.util.List<Long> currentPageJobIds = new java.util.ArrayList<>();
+ 
+@@ -67,6 +79,15 @@ public class Job51 {
+      */
+     public void prepare() {
+         resultList.clear();
++        executionError = null;
++        stopReason = null;
++        selectedCount = 0;
++        confirmedSuccessCount = 0;
++        currentPageNum = 0;
++        reachedDailyLimit = false;
++        synchronized (currentPageJobIds) {
++            currentPageJobIds.clear();
++        }
+     }
+ 
+     /**
+@@ -93,6 +114,7 @@ public class Job51 {
+             // 遍历所有关键词进行投递
+             for (String keyword : config.getKeywords()) {
+                 if (shouldStop()) {
++                    stopReason = "user_cancelled";
+                     sendProgress("用户取消投递", null, null);
+                     break;
+                 }
+@@ -107,6 +129,7 @@ public class Job51 {
+             sendProgress(message, null, null);
+ 
+         } catch (Exception e) {
++            executionError = messageOf(e, "投递过程异常");
+             log.error("51job投递过程出现异常", e);
+             sendProgress("投递出现异常: " + e.getMessage(), null, null);
+         }
+@@ -118,6 +141,26 @@ public class Job51 {
+      * 按关键词投递
+      */
+     private void deliverByKeyword(String keyword, String searchUrl) {
++        for (int attempt = 0; attempt < 2; attempt++) {
++            try {
++                ensurePageReady();
++                deliverByKeywordInternal(keyword, searchUrl);
++                return;
++            } catch (RuntimeException e) {
++                if (!isTargetClosedFailure(e) || pageRecovery == null || attempt == 1) {
++                    throw e;
++                }
++                log.warn("51job Page 已失效，执行第{}次页面恢复后重试关键词", attempt + 1);
++                page = pageRecovery.get();
++                networkHooked = false;
++                synchronized (currentPageJobIds) {
++                    currentPageJobIds.clear();
++                }
++            }
++        }
++    }
++
++    private void deliverByKeywordInternal(String keyword, String searchUrl) {
+         try {
+             // 收敛日志：不输出关键词级日志，仅保留页级摘要
+ 
+@@ -216,6 +259,7 @@ public class Job51 {
+             // 遍历页面投递
+             for (int pageNum = 1; pageNum <= DEFAULT_MAX_PAGE; pageNum++) {
+                 if (shouldStop()) {
++                    stopReason = "user_cancelled";
+                     sendProgress("用户取消投递", null, null);
+                     return;
+                 }
+@@ -224,6 +268,9 @@ public class Job51 {
+                 currentPageNum = pageNum;
+ 
+                 // 跳转到指定页码
++                synchronized (currentPageJobIds) {
++                    currentPageJobIds.clear();
++                }
+                 if (pageNum > 1 && !jumpToPage(pageNum)) {
+                     break;
+                 }
+@@ -252,114 +299,124 @@ public class Job51 {
+             }
+ 
+             // 关键词完成不输出日志
+-        } catch (Exception e) { /* 静默 */ }
++        } catch (RuntimeException e) {
++            throw e;
++        } catch (Exception e) {
++            throw new IllegalStateException("51job关键词投递失败: " + e.getMessage(), e);
++        }
+     }
+ 
+     /**
+      * 投递当前页面的所有职位
+      */
+     private void deliverCurrentPage() {
+-        try {
+-            PlaywrightUtil.sleep(1);
+-
+-            // 查找所有职位的checkbox
+-            Locator checkboxes = page.locator("div.ick");
+-            if (checkboxes.count() == 0) { return; }
+-
+-            // 查找职位名称和公司名称
+-            Locator titles = page.locator("[class*='jname text-cut']");
+-            Locator companies = page.locator("[class*='cname text-cut']");
++        PlaywrightUtil.sleep(1);
+ 
+-            int jobCount = checkboxes.count();
+-
+-            // 选中所有职位
+-            for (int i = 0; i < jobCount; i++) {
+-                if (shouldStop()) {
+-                    return;
+-                }
+-
+-                try {
+-                    Locator checkbox = checkboxes.nth(i);
+-                    // 使用JavaScript点击，避免元素被遮挡
+-                    checkbox.evaluate("el => el.click()");
++        Locator checkboxes = page.locator("div.ick");
++        int jobCount = checkboxes.count();
++        if (jobCount == 0) {
++            throw new IllegalStateException("当前页未找到岗位选择框，页面结构可能已变化");
++        }
+ 
+-                    String title = i < titles.count() ? titles.nth(i).textContent() : "未知职位";
+-                    String company = i < companies.count() ? companies.nth(i).textContent() : "未知公司";
+-                    String jobInfo = company + " | " + title;
+-                    resultList.add(jobInfo);
+-//                    log.info("选中: {}", jobInfo);
+-                } catch (Exception e) { /* 静默 */ }
++        Locator titles = page.locator("[class*='jname text-cut']");
++        Locator companies = page.locator("[class*='cname text-cut']");
++        List<Long> pageJobIds = snapshotCurrentPageJobIds();
++        if (pageJobIds.size() < jobCount) {
++            List<Long> domJobIds = collectJobIdsOnPage();
++            if (!domJobIds.isEmpty()) {
++                pageJobIds = domJobIds;
+             }
++        }
+ 
+-            PlaywrightUtil.sleep(1);
+-
+-            // 滚动到页面顶部
+-            page.evaluate("window.scrollTo(0, 0)");
+-            PlaywrightUtil.sleep(1);
+-
+-            // 点击批量投递按钮
+-            clickBatchDeliverButton();
++        List<String> selectedJobInfos = new ArrayList<>();
++        for (int i = 0; i < jobCount; i++) {
++            if (shouldStop()) {
++                stopReason = "user_cancelled";
++                return;
++            }
++            Locator checkbox = checkboxes.nth(i);
++            checkbox.evaluate("el => el.click()");
++            String title = i < titles.count() ? titles.nth(i).textContent() : "未知职位";
++            String company = i < companies.count() ? companies.nth(i).textContent() : "未知公司";
++            selectedJobInfos.add(company + " | " + title);
++        }
++        selectedCount += selectedJobInfos.size();
+ 
+-            PlaywrightUtil.sleep(3);
++        PlaywrightUtil.sleep(1);
++        page.evaluate("window.scrollTo(0, 0)");
++        PlaywrightUtil.sleep(1);
+ 
+-            // 处理投递成功弹窗
+-            handleDeliverySuccessDialog();
++        if (!clickBatchDeliverButton()) {
++            return;
++        }
+ 
+-            // 处理单独投递申请弹窗
+-            handleSeparateDeliveryDialog();
++        PlaywrightUtil.sleep(3);
++        int successNum = handleDeliverySuccessDialog(selectedJobInfos, pageJobIds);
++        handleSeparateDeliveryDialog();
+ 
+-        } catch (Exception e) {
+-            log.error("投递当前页面失败", e);
++        if (successNum == 0 && !reachedDailyLimit && !shouldStop()) {
++            throw new IllegalStateException("点击批量投递后未确认成功结果");
+         }
++        confirmedSuccessCount += successNum;
+     }
+ 
+     /**
+      * 点击批量投递按钮
+      */
+-    private void clickBatchDeliverButton() {
++    private boolean clickBatchDeliverButton() {
+         int retryCount = 0;
+         boolean success = false;
+ 
+         while (!success && retryCount < 5) {
+             try {
+                 if (shouldStop()) {
+-                    return;
++                    stopReason = "user_cancelled";
++                    return false;
+                 }
+ 
+                 // 查找批量投递按钮
+                 Locator parent = page.locator("div.tabs_in");
+-                Locator buttons = parent.locator("button.p_but");
++                Locator buttons = parent.locator("button.p_but.all_apply");
+ 
+-                if (buttons.count() > 1) {
++                if (buttons.count() > 0) {
+                     PlaywrightUtil.sleep(1);
+-                    buttons.nth(1).click();
++                    buttons.first().click();
+                     
+                     // 🚨 点击后立即检测“日投递上限”提示（短暂出现，需快速多次检测）
+                     for (int i = 0; i < 10; i++) {
+                         try { Thread.sleep(200); } catch (InterruptedException ignored) {} // 每200ms检测一次
+                         if (detectDailyLimitToast51job()) {
+                             reachedDailyLimit = true;
++                            stopReason = "daily_limit";
+                             log.warn("点击投递按钮后，检测到 51job 日投递上限提示，停止投递");
+                             sendProgress("检测到日投递上限，任务已停止", null, null);
+-                            return;
++                            return false;
+                         }
+                     }
+                     
+                     success = true;
+                 } else {
+-                    break;
++                    throw new IllegalStateException("未找到可用的一键投递按钮");
+                 }
+             } catch (Exception e) {
++                if (isTargetClosedFailure(e)) {
++                    throw propagate(e);
++                }
+                 retryCount++;
+                 PlaywrightUtil.sleep(1);
+             }
+         }
++        if (!success) {
++            throw new IllegalStateException("一键投递按钮点击失败");
++        }
++        return true;
+     }
+ 
+     /**
+      * 处理投递成功弹窗
+      */
+-    private void handleDeliverySuccessDialog() {
++    private int handleDeliverySuccessDialog(List<String> selectedJobInfos, List<Long> selectedJobIds) {
++        int confirmed = 0;
+         try {
+             PlaywrightUtil.sleep(2);
+ 
+@@ -377,33 +434,26 @@ public class Job51 {
+                 }
+             }
+ 
+-            // 兼容提示弹框：投递成功N个，未投递M个（更稳健选择器）
+-            Locator elDialogBody = page.locator(".el-dialog__body");
+-            if (elDialogBody.count() > 0) {
+-                String dialogText = elDialogBody.first().innerText();
+-                if (dialogText != null && dialogText.contains("投递成功")) {
+-                    Integer successNum = null;
+-                    Integer failNum = null;
+-                    try {
+-                        java.util.regex.Matcher m1 = java.util.regex.Pattern.compile("投递成功\\D*(\\d+)").matcher(dialogText);
+-                        if (m1.find()) successNum = Integer.parseInt(m1.group(1));
+-                        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile("未投递\\D*(\\d+)").matcher(dialogText);
+-                        if (m2.find()) failNum = Integer.parseInt(m2.group(1));
+-                    } catch (Exception ignored) {}
++            // 页面当前会弹“投递成功！”且不显示数字，也兼容带成功/失败数量的旧文案。
++            String dialogText = findVisibleDeliveryFeedback();
++            if (dialogText != null && dialogText.contains("投递成功")) {
++                    Integer successNum = parseDeliveryCount(dialogText, "投递成功");
++                    Integer failNum = parseDeliveryCount(dialogText, "未投递");
++                    // 明确出现成功弹窗时，本次已勾选岗位就是平台确认成功的批次。
++                    if (successNum == null) {
++                        successNum = selectedJobInfos == null ? 0 : selectedJobInfos.size();
++                    }
+                     log.info("[51job] 投递结果：成功 {} 个，未投递 {} 个", successNum, failNum);
+                     sendProgress(String.format("投递结果：成功 %s 个，未投递 %s 个", successNum == null ? "?" : successNum, failNum == null ? "?" : failNum), null, null);
+ 
+                     // ✅ 投递成功后，标记数据库中的岗位为已投递
+                     if (successNum != null && successNum > 0) {
+                         try {
+-                            List<Long> deliveredIds = new ArrayList<>();
+-                            synchronized (currentPageJobIds) {
+-                                deliveredIds.addAll(currentPageJobIds);
+-                            }
++                            List<Long> deliveredIds = selectedJobIds == null ? new ArrayList<>() : new ArrayList<>(selectedJobIds);
+                             if (!deliveredIds.isEmpty()) {
+                                 // 只标记成功投递的数量（取成功数和缓存数的较小值）
+                                 int markCount = Math.min(successNum, deliveredIds.size());
+-                                List<Long> toMark = deliveredIds.subList(0, markCount);
++                                List<Long> toMark = new ArrayList<>(deliveredIds.subList(0, markCount));
+                                 job51Service.markDeliveredBatch(toMark);
+                                 log.info("[51job] 标记已投递 {} 个职位", toMark.size());
+                             } else {
+@@ -415,6 +465,11 @@ public class Job51 {
+                     } else {
+                         log.warn("[51job] 投递成功数量为0或未解析到，不标记投递状态");
+                     }
++                    confirmed = successNum == null ? 0 : Math.max(0, successNum);
++                    int infoCount = confirmedInfoCount(confirmed, selectedJobInfos == null ? 0 : selectedJobInfos.size());
++                    if (selectedJobInfos != null) {
++                        resultList.addAll(selectedJobInfos.subList(0, infoCount));
++                    }
+ 
+                     // 优先点击“确定/关闭”按钮，其次点右上角关闭，再次退格键
+                     try {
+@@ -456,7 +511,6 @@ public class Job51 {
+                         }
+                         PlaywrightUtil.sleep(1);
+                     } catch (Exception ignored) {}
+-                }
+             }
+ 
+             // 统一尝试关闭任何残留的弹框覆盖层
+@@ -465,12 +519,39 @@ public class Job51 {
+             try {
+                 if (detectDailyLimitToast51job()) {
+                     reachedDailyLimit = true;
++                    stopReason = "daily_limit";
+                     log.warn("处理成功弹窗后，检测到 51job 日投递上限提示，停止当前页");
+                 }
+             } catch (Exception ignored) {}
+         } catch (Exception e) {
++            if (isTargetClosedFailure(e)) {
++                throw propagate(e);
++            }
+             log.debug("未找到投递成功弹窗或处理失败: {}", e.getMessage());
+         }
++        return confirmed;
++    }
++
++    private String findVisibleDeliveryFeedback() {
++        Locator candidates = page.locator(".el-dialog__body:visible, .el-dialog:visible, .el-message-box__content:visible, [role='dialog']:visible");
++        for (int i = 0; i < candidates.count(); i++) {
++            try {
++                String text = candidates.nth(i).innerText();
++                if (text != null && text.contains("投递成功")) {
++                    return text;
++                }
++            } catch (Exception ignored) {}
++        }
++        return null;
++    }
++
++    static Integer parseDeliveryCount(String text, String marker) {
++        if (text == null || marker == null) return null;
++        String normalized = text.replaceAll("\\s+", "");
++        java.util.regex.Matcher matcher = java.util.regex.Pattern
++                .compile(java.util.regex.Pattern.quote(marker) + "[^0-9]{0,20}(\\d+)")
++                .matcher(normalized);
++        return matcher.find() ? Integer.parseInt(matcher.group(1)) : null;
+     }
+ 
+     /**
+@@ -503,36 +584,46 @@ public class Job51 {
+         for (int retry = 0; retry < 3; retry++) {
+             try {
+                 if (shouldStop()) {
++                    stopReason = "user_cancelled";
+                     return false;
+                 }
+ 
+                 // 跳页前先尝试关闭可能遮挡操作的弹框
+                 closeAnyModalOverlays();
+ 
+-                Locator pageInput = page.locator("#jump_page");
+-                if (pageInput.count() == 0) {
+-                    log.warn("未找到页码输入框");
+-                    return false;
++                if (isActivePage(pageNum)) {
++                    return true;
+                 }
+ 
+-                PlaywrightUtil.sleep(1);
+-                pageInput.click();
+-                pageInput.fill("");
+-                pageInput.fill(String.valueOf(pageNum));
+-
+-                // 点击跳转按钮
+-                Locator jumpButton = page.locator("#app > div > div.post > div > div > div.j_result > div > div:nth-child(2) > div > div.bottom-page > div > div > span.jumpPage");
+-                if (jumpButton.count() > 0) {
+-                    jumpButton.click();
++                Locator pageNumbers = page.locator(".bottom-page .el-pagination .el-pager li.number");
++                boolean clicked = false;
++                for (int i = 0; i < pageNumbers.count(); i++) {
++                    String text = pageNumbers.nth(i).textContent();
++                    if (text != null && text.trim().equals(String.valueOf(pageNum))) {
++                        pageNumbers.nth(i).click();
++                        clicked = true;
++                        break;
++                    }
+                 }
+ 
+-                // 滚动到页面顶部
+-                page.evaluate("window.scrollTo(0, 0)");
+-                PlaywrightUtil.sleep(2);
++                if (!clicked) {
++                    Locator next = page.locator(".bottom-page .el-pagination button.btn-next");
++                    if (next.count() == 0 || next.isDisabled()) {
++                        log.info("分页已到末页，目标第{}页未找到", pageNum);
++                        return false;
++                    }
++                    next.click();
++                }
+ 
+-                log.info("成功跳转到第{}页", pageNum);
+-                return true;
++                if (waitForActivePage(pageNum, 10000)) {
++                    log.info("成功跳转到第{}页", pageNum);
++                    return true;
++                }
++                throw new IllegalStateException("分页点击后未切换到第" + pageNum + "页");
+             } catch (Exception e) {
++                if (isTargetClosedFailure(e)) {
++                    throw propagate(e);
++                }
+                 log.warn("跳转到第{}页失败，重试第{}次: {}", pageNum, retry + 1, e.getMessage());
+                 PlaywrightUtil.sleep(1);
+ 
+@@ -540,13 +631,48 @@ public class Job51 {
+                 if (checkAccessVerification()) {
+                     return false;
+                 }
+-                page.reload();
++                try {
++                    page.reload();
++                } catch (Exception reloadError) {
++                    if (isTargetClosedFailure(reloadError)) {
++                        throw propagate(reloadError);
++                    }
++                }
+                 PlaywrightUtil.sleep(2);
+             }
+         }
+         return false;
+     }
+ 
++    private boolean isActivePage(int pageNum) {
++        Locator active = page.locator(".bottom-page .el-pagination .el-pager li.number.active");
++        return active.count() > 0 && pageNumberMatches(active.first().textContent(), pageNum);
++    }
++
++    static boolean pageNumberMatches(String text, int pageNum) {
++        return text != null && text.trim().equals(String.valueOf(pageNum));
++    }
++
++    static int confirmedInfoCount(int confirmed, int selected) {
++        return Math.min(Math.max(confirmed, 0), Math.max(selected, 0));
++    }
++
++    private boolean waitForActivePage(int pageNum, long timeoutMs) {
++        long deadline = System.currentTimeMillis() + timeoutMs;
++        while (System.currentTimeMillis() < deadline) {
++            if (isActivePage(pageNum) && page.locator("div.ick").count() > 0) {
++                return true;
++            }
++            try {
++                Thread.sleep(200);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++                return false;
++            }
++        }
++        return false;
++    }
++
+     /**
+      * 统一关闭可能出现的弹框覆盖层（ElementUI/VanPopup 等）。
+      */
+@@ -770,8 +896,6 @@ public class Job51 {
+                     log.warn("[51job] 当前页未采集到任何 jobId，可能页面结构变化或选择器不匹配");
+                     // 向前端推送警告，便于按钮重置
+                     sendProgress("[51job] 当前页未采集到任何 jobId，可能页面结构变化或选择器不匹配", null, null);
+-                    // 设置达上限标记，外层循环将终止
+-                    reachedDailyLimit = true;
+                 }
+             } catch (Exception ignored) {}
+         } catch (Exception e) {
+@@ -826,6 +950,62 @@ public class Job51 {
+         }
+     }
+ 
++    private void ensurePageReady() {
++        try {
++            if (page != null && !page.isClosed()) {
++                page.url();
++                return;
++            }
++        } catch (Exception e) {
++            if (!isTargetClosedFailure(e)) {
++                throw propagate(e);
++            }
++        }
++        if (pageRecovery == null) {
++            throw new IllegalStateException("51job页面不可用，且没有页面恢复回调");
++        }
++        page = pageRecovery.get();
++        if (page == null || page.isClosed()) {
++            throw new IllegalStateException("51job页面恢复后仍不可用");
++        }
++    }
++
++    private List<Long> snapshotCurrentPageJobIds() {
++        synchronized (currentPageJobIds) {
++            return new ArrayList<>(currentPageJobIds);
++        }
++    }
++
++    static boolean isTargetClosedFailure(Throwable error) {
++        Throwable current = error;
++        while (current != null) {
++            String message = current.getMessage();
++            if (message != null) {
++                String normalized = message.toLowerCase(java.util.Locale.ROOT);
++                if (normalized.contains("targetclosederror")
++                        || normalized.contains("target page, context or browser has been closed")
++                        || normalized.contains("page has been closed")
++                        || normalized.contains("context has been closed")
++                        || normalized.contains("browser has been closed")) {
++                    return true;
++                }
++            }
++            current = current.getCause();
++        }
++        return false;
++    }
++
++    private String messageOf(Throwable error, String fallback) {
++        String message = error == null ? null : error.getMessage();
++        return message == null || message.isBlank() ? fallback : message;
++    }
++
++    private RuntimeException propagate(Throwable error) {
++        return error instanceof RuntimeException
++                ? (RuntimeException) error
++                : new IllegalStateException(messageOf(error, "Playwright页面操作失败"), error);
++    }
++
+     /**
+      * 检查是否应该停止
+      */
+diff --git a/src/main/java/com/getjobs/worker/manager/PlaywrightManager.java b/src/main/java/com/getjobs/worker/manager/PlaywrightManager.java
+index ba84549..3675538 100644
+--- a/src/main/java/com/getjobs/worker/manager/PlaywrightManager.java
++++ b/src/main/java/com/getjobs/worker/manager/PlaywrightManager.java
+@@ -17,15 +17,29 @@ import org.springframework.scheduling.annotation.Scheduled;
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.net.HttpURLConnection;
++import java.net.URI;
++import java.net.URLEncoder;
+ import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
+ import java.util.ArrayList;
++import java.util.HashSet;
++import java.util.Set;
+ import java.util.List;
+-import java.util.Locale;
++import java.util.HashMap;
++import java.util.LinkedHashMap;
+ import java.util.Map;
+-import java.util.concurrent.CompletableFuture;
++import java.util.Locale;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.locks.ReentrantLock;
+ import java.util.function.Consumer;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
+ 
+ /**
+  * Playwright管理器
+@@ -52,7 +66,7 @@ public class PlaywrightManager {
+     private Page bossPage;
+ 
+     // 猎聘页面
+-    private Page liepinPage;
++    private volatile Page liepinPage;
+ 
+     // 51job页面（预留）
+     private Page job51Page;
+@@ -83,9 +97,46 @@ public class PlaywrightManager {
+     // 默认超时时间（毫秒）
+   private static final int DEFAULT_TIMEOUT = 30000;
+ 
+-    // Playwright调试端口
++    // Playwright调试端口（产品依赖外部连接）
+     private static final int CDP_PORT = 7866;
+ 
++    /** 系统 Chrome + 持久 profile（connectOverCDP 路径） */
++    private static final Path CHROME_PROFILE_DIR = Paths.get("browser-data", "chrome-cdp-profile");
++
++    /** 本进程拉起的系统 Chrome；仅在我们 spawn 时负责销毁 */
++    private Process managedChromeProcess;
++
++    /** true=走系统 Chrome + CDP 模式（可 detach 登录） */
++    private boolean connectedOverCdp;
++
++    /** true=当前 Playwright 已附着 browser/context/pages */
++    private volatile boolean playwrightAttached;
++
++    /** 四平台并发初始化是否完成（完成前禁止 detach 登录） */
++    private volatile boolean initializationComplete;
++
++    /** Boss hands-off 登录进行中：Playwright 已断开，Chrome 仍活着 */
++    private volatile boolean bossHandsOffLoginActive;
++
++    /** 防止并发 hands-off */
++    private final AtomicBoolean bossHandsOffLoginGate = new AtomicBoolean(false);
++
++    private final Object cdpLifecycleLock = new Object();
++
++    /**
++     * Playwright Java 对象不是线程安全的，所有共享 Browser/Page 操作统一走这把锁。
++     * ponytail: 全局锁会牺牲不同平台并行吞吐；当前共享 BrowserContext 只能串行，后续拆独立上下文时再细分。
++     */
++    private final ReentrantLock playwrightAccessLock = new ReentrantLock(true);
++
++    /** 防止重连或页面恢复时重复注册猎聘登录监控。 */
++    private final Set<Page> liepinMonitoredPages = ConcurrentHashMap.newKeySet();
++    /** 防止重连或页面恢复时重复注册 51job 登录监控。 */
++    private final Set<Page> job51MonitoredPages = ConcurrentHashMap.newKeySet();
++
++    private static final String BOSS_LOGIN_URL = "https://www.zhipin.com/web/user/?ka=header-login";
++    private static final long BOSS_HANDS_OFF_TIMEOUT_MS = 15 * 60 * 1000L;
++
+     // 平台URL常量
+     private static final String BOSS_URL = "https://www.zhipin.com";
+     private static final String LIEPIN_URL = "https://www.liepin.com";
+@@ -120,22 +171,11 @@ public class PlaywrightManager {
+             playwright = Playwright.create();
+             log.info("✓ Playwright引擎已启动");
+ 
+-            // 创建浏览器实例，使用固定CDP端口7866，最大化启动
+-            browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
+-                    .setHeadless(false) // 非无头模式，可视化调试
+-                    .setSlowMo(50) // 放慢操作速度，便于调试
+-                    .setArgs(List.of(
+-                            "--remote-debugging-port=" + CDP_PORT, // 使用固定CDP端口
+-                            "--start-maximized" // 最大化启动窗口
+-                    )));
+-            log.info("✓ Chrome浏览器已启动 (调试端口: {})", CDP_PORT);
+-
+-            // 创建共享的BrowserContext（所有平台在同一个窗口的不同标签页中）
+-            context = browser.newContext(new Browser.NewContextOptions()
+-                    .setViewportSize(null) // 不设置固定视口，使用浏览器窗口实际大小
+-                    .setUserAgent(
+-                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"));
+-            log.info("✓ BrowserContext已创建（所有平台共享）");
++            // 优先：系统 Chrome + 持久 profile + connectOverCDP（绕过 Playwright launch Chrome 秒退）
++            // 回退：捆绑 Chromium + Plan A stealth；UA/sec-ch-ua 与真实 major 对齐且不冒充 Google Chrome 品牌
++            if (!attachOrLaunchSystemChromeOverCdp()) {
++                launchBundledChromiumWithStealth();
++            }
+             injectBossInitScript(context);
+ 
+             // 顺序创建所有Page（避免并发创建Page导致的竞态条件）
+@@ -156,17 +196,20 @@ public class PlaywrightManager {
+             zhilianPage.setDefaultTimeout(DEFAULT_TIMEOUT);
+             log.info("✓ 智联招聘 Page已创建");
+ 
+-            // 并发执行各平台的初始化逻辑（导航、Cookie加载等）
+-            log.info("开始并发初始化所有平台...");
+-            CompletableFuture<Void> bossFuture = CompletableFuture.runAsync(this::setupBossPlatform);
+-            CompletableFuture<Void> liepinFuture = CompletableFuture.runAsync(this::setupLiepinPlatform);
+-            CompletableFuture<Void> job51Future = CompletableFuture.runAsync(this::setup51jobPlatform);
+-            CompletableFuture<Void> zhilianFuture = CompletableFuture.runAsync(this::setupZhilianPlatform);
+-
+-            // 等待所有平台初始化完成
+-            CompletableFuture.allOf(bossFuture, liepinFuture, job51Future, zhilianFuture).join();
++            // Playwright Java 对共享对象要求串行访问；页面仍可并存，但导航和 DOM 操作不能并发。
++            log.info("开始串行初始化所有平台...");
++            withPlaywrightAccess(this::setupBossPlatform);
++            withPlaywrightAccess(this::setupLiepinPlatform);
++            withPlaywrightAccess(this::setup51jobPlatform);
++            withPlaywrightAccess(this::setupZhilianPlatform);
++            initializationComplete = true;
++
++            // Boss 改为 Cookie 登录：不再自动 hands-off 打开登录页
++            if (!Boolean.TRUE.equals(loginStatus.get("boss"))) {
++                log.info("Boss 未登录：请在前端粘贴 Cookie 导入登录（已禁用 hands-off 自动登录引导）");
++            }
+ 
+-            log.info("✓ 浏览器自动化引擎初始化完成（所有平台已并发启动）");
++            log.info("✓ 浏览器自动化引擎初始化完成（所有平台已串行初始化）");
+             log.info("========================================");
+         } catch (Exception e) {
+             log.error("✗ 浏览器自动化引擎初始化失败", e);
+@@ -174,9 +217,309 @@ public class PlaywrightManager {
+         }
+     }
+ 
++    /**
++     * 在共享 Playwright 访问锁内执行动作。Playwright 调用可能持续数分钟，锁必须覆盖完整的平台任务。
++     */
++    public void withPlaywrightAccess(Runnable action) {
++        if (action == null) {
++            throw new IllegalArgumentException("Playwright action 不能为空");
++        }
++        playwrightAccessLock.lock();
++        try {
++            action.run();
++        } finally {
++            playwrightAccessLock.unlock();
++        }
++    }
++
++    private boolean tryWithPlaywrightAccess(Runnable action) {
++        if (!playwrightAccessLock.tryLock()) {
++            return false;
++        }
++        try {
++            action.run();
++            return true;
++        } finally {
++            playwrightAccessLock.unlock();
++        }
++    }
++
+     /**
+      * 在上下文层统一注入 Boss 脚本，仅对 zhipin.com 生效。
+      */
++    /**
++     * 尝试附着/拉起系统 Chrome 调试实例并 connectOverCDP。
++     * @return true 表示 context 已就绪
++     */
++    private boolean attachOrLaunchSystemChromeOverCdp() {
++        try {
++            String chromePath = resolveChromeExecutable();
++            if (chromePath == null) {
++                log.info("未找到系统 Chrome，跳过 connectOverCDP 路径");
++                return false;
++            }
++
++            if (!isCdpReachable(CDP_PORT)) {
++                Files.createDirectories(CHROME_PROFILE_DIR);
++                List<String> cmd = List.of(
++                        chromePath,
++                        "--remote-debugging-port=" + CDP_PORT,
++                        "--remote-allow-origins=*",
++                        "--user-data-dir=" + CHROME_PROFILE_DIR.toAbsolutePath(),
++                        "--disable-blink-features=AutomationControlled",
++                        "--no-first-run",
++                        "--no-default-browser-check",
++                        "--disable-infobars",
++                        "--start-maximized",
++                        "about:blank"
++                );
++                ProcessBuilder pb = new ProcessBuilder(cmd);
++                // Chrome 启动器常秒退并把浏览器托管给子进程；丢弃管道避免阻塞
++                pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
++                pb.redirectError(ProcessBuilder.Redirect.DISCARD);
++                managedChromeProcess = pb.start();
++                log.info("已拉起系统 Chrome 调试实例: path={}, profile={}, pid={}",
++                        chromePath, CHROME_PROFILE_DIR.toAbsolutePath(), managedChromeProcess.pid());
++                if (!waitForCdp(CDP_PORT, 30_000)) {
++                    log.warn("系统 Chrome CDP 端口 {} 等待超时，回退捆绑 Chromium", CDP_PORT);
++                    destroyManagedChromeQuietly();
++                    return false;
++                }
++            } else {
++                String existing = fetchCdpBrowserProduct(CDP_PORT);
++                log.info("检测到已有 CDP 服务 :{} product={}", CDP_PORT, existing);
++                if (isLikelyBundledChromiumProduct(existing)) {
++                    log.warn("CDP :{} 疑似捆绑 Chromium，放弃附着: {}", CDP_PORT, existing);
++                    return false;
++                }
++            }
++
++            browser = playwright.chromium().connectOverCDP("http://127.0.0.1:" + CDP_PORT);
++            connectedOverCdp = true;
++            if (browser.contexts() != null && !browser.contexts().isEmpty()) {
++                context = browser.contexts().get(0);
++            } else {
++                context = browser.newContext(new Browser.NewContextOptions()
++                        .setViewportSize(null)
++                        .setLocale("zh-CN")
++                        .setTimezoneId("Asia/Shanghai"));
++            }
++            try {
++                context.setExtraHTTPHeaders(Map.of("Accept-Language", "zh-CN,zh;q=0.9"));
++            } catch (Exception e) {
++                log.debug("设置 Accept-Language 失败（可忽略）: {}", e.getMessage());
++            }
++            String ver = safeBrowserVersion();
++            playwrightAttached = true;
++            log.info("✓ 已 connectOverCDP 附着浏览器 (port={}, version={})", CDP_PORT, ver);
++            return context != null;
++        } catch (Exception e) {
++            log.warn("connectOverCDP / 系统 Chrome 路径失败，将回退捆绑 Chromium: {}", e.getMessage());
++            destroyManagedChromeQuietly();
++            connectedOverCdp = false;
++            browser = null;
++            context = null;
++            return false;
++        }
++    }
++
++    /**
++     * 回退：Playwright 捆绑 Chromium + 降自动化特征（Plan A 加固）。
++     */
++    private void launchBundledChromiumWithStealth() {
++        browser = playwright.chromium().launch(new BrowserType.LaunchOptions()
++                .setHeadless(false)
++                .setSlowMo(50)
++                .setIgnoreDefaultArgs(List.of("--enable-automation"))
++                .setArgs(List.of(
++                        "--remote-debugging-port=" + CDP_PORT,
++                        "--start-maximized",
++                        "--disable-blink-features=AutomationControlled",
++                        "--disable-infobars",
++                        "--no-first-run",
++                        "--no-default-browser-check"
++                )));
++        connectedOverCdp = false;
++        playwrightAttached = true;
++        String version = safeBrowserVersion();
++        String chromeMajor = extractChromeMajor(version, "134");
++        String windowsChromeUa = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
++                + "(KHTML, like Gecko) Chrome/" + chromeMajor + ".0.0.0 Safari/537.36";
++        context = browser.newContext(new Browser.NewContextOptions()
++                .setViewportSize(null)
++                .setUserAgent(windowsChromeUa)
++                .setLocale("zh-CN")
++                .setTimezoneId("Asia/Shanghai")
++                .setExtraHTTPHeaders(Map.of(
++                        "Accept-Language", "zh-CN,zh;q=0.9",
++                        "sec-ch-ua", "\"Chromium\";v=\"" + chromeMajor + "\", \"Not-A.Brand\";v=\"24\"",
++                        "sec-ch-ua-mobile", "?0",
++                        "sec-ch-ua-platform", "\"Windows\""
++                )));
++        log.info("✓ 捆绑 Chromium 已启动 (port={}, version={}, UA major={})", CDP_PORT, version, chromeMajor);
++    }
++
++    private String resolveChromeExecutable() {
++        List<Path> candidates = List.of(
++                Paths.get(System.getProperty("user.home"), "AppData", "Local", "Google", "Chrome", "Application", "chrome.exe"),
++                Paths.get("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"),
++                Paths.get("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe")
++        );
++        for (Path p : candidates) {
++            if (Files.isRegularFile(p)) {
++                return p.toAbsolutePath().toString();
++            }
++        }
++        return null;
++    }
++
++    private boolean isCdpReachable(int port) {
++        HttpURLConnection conn = null;
++        try {
++            conn = (HttpURLConnection) URI.create("http://127.0.0.1:" + port + "/json/version").toURL().openConnection();
++            conn.setConnectTimeout(800);
++            conn.setReadTimeout(800);
++            conn.setRequestMethod("GET");
++            int code = conn.getResponseCode();
++            return code >= 200 && code < 500;
++        } catch (Exception e) {
++            return false;
++        } finally {
++            if (conn != null) {
++                conn.disconnect();
++            }
++        }
++    }
++
++    private String fetchCdpBrowserProduct(int port) {
++        HttpURLConnection conn = null;
++        try {
++            conn = (HttpURLConnection) URI.create("http://127.0.0.1:" + port + "/json/version").toURL().openConnection();
++            conn.setConnectTimeout(800);
++            conn.setReadTimeout(800);
++            conn.setRequestMethod("GET");
++            if (conn.getResponseCode() >= 400) {
++                return "";
++            }
++            try (InputStream in = conn.getInputStream()) {
++                return new String(in.readAllBytes(), StandardCharsets.UTF_8).replaceAll("\\s+", " ");
++            }
++        } catch (Exception e) {
++            return "";
++        } finally {
++            if (conn != null) {
++                conn.disconnect();
++            }
++        }
++    }
++
++    /**
++     * Playwright 1.51 捆绑 Chromium 当前约 134.x；本机系统 Chrome 已到 146+。
++     * 用 major 版本做启发式区分，避免 connectOverCDP 挂到错误浏览器。
++     */
++    private boolean isLikelyBundledChromiumProduct(String productJson) {
++        if (productJson == null || productJson.isBlank()) {
++            return false;
++        }
++        Matcher m = Pattern.compile("Chrome/(\\d+)").matcher(productJson);
++        if (m.find()) {
++            try {
++                int major = Integer.parseInt(m.group(1));
++                return major > 0 && major < 140;
++            } catch (NumberFormatException ignored) {
++                return false;
++            }
++        }
++        return productJson.toLowerCase(Locale.ROOT).contains("chromium")
++                && !productJson.contains("Google Chrome");
++    }
++
++    private boolean waitForCdp(int port, long timeoutMs) {
++        long deadline = System.currentTimeMillis() + timeoutMs;
++        boolean launcherExitedLogged = false;
++        while (System.currentTimeMillis() < deadline) {
++            // Windows 上 Chrome 启动器常快速退出，真实浏览器以子进程存活；
++            // 不能把 launcher 退出当成 CDP 失败，只以 /json/version 可达为准。
++            if (!launcherExitedLogged && managedChromeProcess != null && !managedChromeProcess.isAlive()) {
++                log.info("Chrome 启动器进程已退出（常见），继续等待 CDP :{} ...", port);
++                launcherExitedLogged = true;
++            }
++            if (isCdpReachable(port)) {
++                return true;
++            }
++            try {
++                Thread.sleep(300);
++            } catch (InterruptedException ie) {
++                Thread.currentThread().interrupt();
++                return false;
++            }
++        }
++        return false;
++    }
++
++    private String safeBrowserVersion() {
++        try {
++            return browser != null ? browser.version() : "unknown";
++        } catch (Exception e) {
++            return "unknown";
++        }
++    }
++
++    private String extractChromeMajor(String version, String fallback) {
++        if (version == null || version.isBlank()) {
++            return fallback;
++        }
++        Matcher m = Pattern.compile("(\\d+)").matcher(version);
++        if (m.find()) {
++            return m.group(1);
++        }
++        return fallback;
++    }
++
++    private void destroyManagedChromeQuietly() {
++        try {
++            if (managedChromeProcess != null) {
++                try {
++                    managedChromeProcess.toHandle().descendants().forEach(ph -> {
++                        try { ph.destroy(); } catch (Exception ignored) {}
++                    });
++                } catch (Exception ignored) {}
++                try {
++                    managedChromeProcess.destroy();
++                    if (!managedChromeProcess.waitFor(2, TimeUnit.SECONDS)) {
++                        managedChromeProcess.destroyForcibly();
++                    }
++                } catch (Exception e) {
++                    log.debug("销毁托管 Chrome 启动器失败: {}", e.getMessage());
++                }
++            }
++            killChromeByProfileDir(CHROME_PROFILE_DIR.toAbsolutePath().toString());
++        } finally {
++            managedChromeProcess = null;
++        }
++    }
++
++    private void killChromeByProfileDir(String profileDir) {
++        if (profileDir == null || profileDir.isBlank()) {
++            return;
++        }
++        try {
++            String needle = profileDir.replace("'", "''");
++            ProcessBuilder pb = new ProcessBuilder(
++                    "powershell",
++                    "-NoProfile",
++                    "-Command",
++                    "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'chrome|chromium' -and $_.CommandLine -and $_.CommandLine.Contains('" + needle + "') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
++            );
++            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
++            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
++            Process p = pb.start();
++            p.waitFor(5, TimeUnit.SECONDS);
++        } catch (Exception e) {
++            log.debug("按 profile 清理 Chrome 失败: {}", e.getMessage());
++        }
++    }
++
+     private void injectBossInitScript(BrowserContext targetContext) {
+         String script = readResourceText(BOSS_INIT_SCRIPT_RESOURCE);
+         if (script == null || script.isBlank()) {
+@@ -288,6 +631,9 @@ public class PlaywrightManager {
+      * 检查Boss是否已登录
+      */
+     private boolean checkIfLoggedIn() {
++        if (bossPage == null || !playwrightAttached) {
++            return false;
++        }
+         // 更稳健的登录判断：优先检测用户头像/昵称是否可见；备用检测登录入口是否可见且包含“登录”文本
+         try {
+             Locator userLabel = bossPage.locator("li.nav-figure span.label-text").first();
+@@ -327,12 +673,14 @@ public class PlaywrightManager {
+     private void setupLoginMonitoring(Page page) {
+         // 监听页面导航事件，检测URL变化
+         page.onFrameNavigated(frame -> {
+-            if (frame == page.mainFrame()) {
+-                // 事件触发的检查在Playwright内部线程执行，仍需遵守暂停标志
+-                if (!bossMonitoringPaused) {
+-                    checkLoginStatus(page, "boss");
++            tryWithPlaywrightAccess(() -> {
++                if (frame == page.mainFrame()) {
++                    // 事件触发的检查也必须和任务共用同一访问锁。
++                    if (!bossMonitoringPaused) {
++                        checkLoginStatus(page, "boss");
++                    }
+                 }
+-            }
++            });
+         });
+ 
+         log.info("{}平台登录状态监控已启用", "boss");
+@@ -505,18 +853,175 @@ public class PlaywrightManager {
+      * @param page 页面实例
+      */
+     private void setupLiepinLoginMonitoring(Page page) {
++        if (page == null || !liepinMonitoredPages.add(page)) {
++            return;
++        }
++
++        page.onClose(closedPage -> {
++            if (liepinPage == closedPage) {
++                liepinPage = null;
++                log.warn("猎聘页面已关闭，等待投递流程按需恢复");
++            }
++        });
++
+         // 监听页面导航事件，检测URL变化
+         page.onFrameNavigated(frame -> {
+-            if (frame == page.mainFrame()) {
+-                if (!liepinMonitoringPaused) {
+-                    checkLiepinLoginStatus(page);
++            tryWithPlaywrightAccess(() -> {
++                if (frame == page.mainFrame()) {
++                    if (!liepinMonitoringPaused) {
++                        checkLiepinLoginStatus(page);
++                    }
+                 }
+-            }
++            });
+         });
+ 
+         log.info("猎聘平台登录状态监控已启用");
+     }
+ 
++    /**
++     * 返回可供投递使用的猎聘页面；页面关闭时重建，浏览器连接失效时尝试一次 CDP 重连。
++     * 调用方通常已经持有共享 Playwright 锁；该方法自身加锁以覆盖独立调用场景。
++     */
++    public Page ensureLiepinPageReady() {
++        playwrightAccessLock.lock();
++        try {
++            if (isUsableLiepinPage(liepinPage)) {
++                return liepinPage;
++            }
++
++            log.warn("猎聘页面不可用，开始执行生命周期恢复");
++            if (!isBrowserConnectionUsable()) {
++                if (connectedOverCdp && isCdpReachable(CDP_PORT)) {
++                    reconnectPlaywrightAfterHandsOff("liepin-target-closed");
++                    // 投递期间仍由任务独占猎聘页，重连方法恢复监控后这里立即暂停。
++                    liepinMonitoringPaused = true;
++                } else {
++                    throw new IllegalStateException("猎聘浏览器连接已失效，当前恢复条件不满足");
++                }
++            }
++
++            if (isUsableLiepinPage(liepinPage)) {
++                return liepinPage;
++            }
++            return createLiepinRecoveryPage();
++        } finally {
++            playwrightAccessLock.unlock();
++        }
++    }
++
++    private Page createLiepinRecoveryPage() {
++        if (context == null || browser == null || !browser.isConnected()) {
++            throw new IllegalStateException("猎聘浏览器上下文已失效，当前恢复条件不满足");
++        }
++
++        Page recovered = context.newPage();
++        recovered.setDefaultTimeout(DEFAULT_TIMEOUT);
++        liepinPage = recovered;
++        setupLiepinLoginMonitoring(recovered);
++        try {
++            recovered.navigate(LIEPIN_URL, new Page.NavigateOptions()
++                    .setTimeout(60000)
++                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++            recovered.waitForLoadState(LoadState.DOMCONTENTLOADED,
++                    new Page.WaitForLoadStateOptions().setTimeout(10000));
++            setLoginStatus("liepin", checkIfLiepinLoggedIn());
++            log.info("猎聘页面已恢复");
++            return recovered;
++        } catch (Exception e) {
++            if (liepinPage == recovered) {
++                liepinPage = null;
++            }
++            try {
++                recovered.close();
++            } catch (Exception ignored) {
++            }
++            throw new IllegalStateException("猎聘页面恢复失败", e);
++        }
++    }
++
++    private boolean isUsableLiepinPage(Page candidate) {
++        if (candidate == null || candidate.isClosed()) {
++            return false;
++        }
++        return browser != null && browser.isConnected() && context != null;
++    }
++
++    /** 返回可供投递使用的 51job 页面；页面或 CDP 连接失效时执行一次生命周期恢复。 */
++    public Page ensureJob51PageReady() {
++        playwrightAccessLock.lock();
++        try {
++            if (isUsableJob51Page(job51Page)) {
++                return job51Page;
++            }
++
++            log.warn("51job页面不可用，开始执行生命周期恢复");
++            if (!isBrowserConnectionUsable()) {
++                if (connectedOverCdp && isCdpReachable(CDP_PORT)) {
++                    reconnectPlaywrightAfterHandsOff("job51-target-closed");
++                    job51MonitoringPaused = true;
++                } else {
++                    throw new IllegalStateException("51job浏览器连接已失效，暂时无法恢复页面");
++                }
++            }
++
++            if (isUsableJob51Page(job51Page)) {
++                return job51Page;
++            }
++            return createJob51RecoveryPage();
++        } finally {
++            playwrightAccessLock.unlock();
++        }
++    }
++
++    private Page createJob51RecoveryPage() {
++        if (context == null || browser == null || !browser.isConnected()) {
++            throw new IllegalStateException("51job浏览器上下文已失效，暂时无法恢复页面");
++        }
++
++        Page recovered = context.newPage();
++        recovered.setDefaultTimeout(DEFAULT_TIMEOUT);
++        job51Page = recovered;
++        setup51jobLoginMonitoring(recovered);
++        try {
++            recovered.navigate(JOB51_URL, new Page.NavigateOptions()
++                    .setTimeout(60000)
++                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++            recovered.waitForLoadState(LoadState.DOMCONTENTLOADED,
++                    new Page.WaitForLoadStateOptions().setTimeout(10000));
++            setLoginStatus("51job", checkIf51jobLoggedIn());
++            log.info("51job页面已恢复");
++            return recovered;
++        } catch (Exception e) {
++            if (job51Page == recovered) {
++                job51Page = null;
++            }
++            try {
++                recovered.close();
++            } catch (Exception ignored) {
++            }
++            throw new IllegalStateException("51job页面恢复失败", e);
++        }
++    }
++
++    private boolean isUsableJob51Page(Page candidate) {
++        if (candidate == null || candidate.isClosed()) {
++            return false;
++        }
++        return browser != null && browser.isConnected() && context != null;
++    }
++
++    private boolean isBrowserConnectionUsable() {
++        if (!playwrightAttached || browser == null || context == null) {
++            return false;
++        }
++        try {
++            return browser.isConnected() && context.pages() != null;
++        } catch (Exception e) {
++            log.debug("检查猎聘浏览器连接失败: {}", e.getMessage());
++            return false;
++        }
++    }
++
+     /**
+      * 设置51job平台（加载Cookie、导航、监控）
+      */
+@@ -661,13 +1166,26 @@ public class PlaywrightManager {
+      * @param page 页面实例
+      */
+     private void setup51jobLoginMonitoring(Page page) {
++        if (page == null || !job51MonitoredPages.add(page)) {
++            return;
++        }
++
++        page.onClose(closedPage -> {
++            if (job51Page == closedPage) {
++                job51Page = null;
++                log.warn("51job页面已关闭，等待投递流程按需恢复");
++            }
++        });
++
+         // 监听页面导航事件，检测URL变化
+         page.onFrameNavigated(frame -> {
+-            if (frame == page.mainFrame()) {
+-                if (!job51MonitoringPaused) {
+-                    check51jobLoginStatus(page);
++            tryWithPlaywrightAccess(() -> {
++                if (frame == page.mainFrame()) {
++                    if (!job51MonitoringPaused) {
++                        check51jobLoginStatus(page);
++                    }
+                 }
+-            }
++            });
+         });
+ 
+         log.info("51job平台登录状态监控已启用");
+@@ -714,15 +1232,19 @@ public class PlaywrightManager {
+             try {
+                 int maxSeconds = 300; // 最长等待 5 分钟
+                 for (int i = 0; i < maxSeconds; i++) {
+-                    boolean loggedIn = false;
+-                    try {
+-                        loggedIn = checkIf51jobLoggedIn();
+-                    } catch (Exception ignored) {
+-                    }
++                    final boolean[] loggedIn = {false};
++                    withPlaywrightAccess(() -> {
++                        try {
++                            loggedIn[0] = checkIf51jobLoggedIn();
++                            if (loggedIn[0]) {
++                                // 登录成功回调也必须和 Cookie 读取处于同一临界区。
++                                on51jobLoginSuccess();
++                            }
++                        } catch (Exception ignored) {
++                        }
++                    });
+ 
+-                    if (loggedIn) {
+-                        // 交由统一回调处理登录成功逻辑（包含状态更新与保存 Cookie）
+-                        on51jobLoginSuccess();
++                    if (loggedIn[0]) {
+                         log.info("后台等待检测到 51job 登录成功，用时约 {} 秒", i);
+                         return;
+                     }
+@@ -780,13 +1302,17 @@ public class PlaywrightManager {
+      * 主动保存51job Cookie到数据库（用于调试/验证）
+      */
+     public void save51jobCookiesToDb(String remark) {
+-        save51jobCookiesToDatabase(remark);
++        withPlaywrightAccess(() -> save51jobCookiesToDatabase(remark));
+     }
+ 
+     /**
+      * 清理51job上下文中的Cookie
+      */
+     public void clear51jobCookies() {
++        withPlaywrightAccess(this::clear51jobCookiesInternal);
++    }
++
++    private void clear51jobCookiesInternal() {
+         try {
+             if (context != null) {
+                 context.clearCookies();
+@@ -820,6 +1346,10 @@ public class PlaywrightManager {
+      * 触发 51job 登录流程：打开登录页并点击“微信扫码登录”按钮
+      */
+     public void trigger51jobLogin() {
++        withPlaywrightAccess(this::trigger51jobLoginInternal);
++    }
++
++    private void trigger51jobLoginInternal() {
+         try {
+             if (job51Page == null) {
+                 if (context == null) {
+@@ -1086,11 +1616,13 @@ public class PlaywrightManager {
+     private void setupZhilianLoginMonitoring(Page page) {
+         // 监听页面导航事件，检测URL变化
+         page.onFrameNavigated(frame -> {
+-            if (frame == page.mainFrame()) {
+-                if (!zhilianMonitoringPaused) {
+-                    checkZhilianLoginStatus(page);
++            tryWithPlaywrightAccess(() -> {
++                if (frame == page.mainFrame()) {
++                    if (!zhilianMonitoringPaused) {
++                        checkZhilianLoginStatus(page);
++                    }
+                 }
+-            }
++            });
+         });
+ 
+         log.info("智联招聘平台登录状态监控已启用");
+@@ -1119,6 +1651,10 @@ public class PlaywrightManager {
+      * 主动触发智联招聘登录：点击二维码入口并等待登录成功跳转
+      */
+     public void triggerZhilianLogin() {
++        withPlaywrightAccess(this::triggerZhilianLoginInternal);
++    }
++
++    private void triggerZhilianLoginInternal() {
+         try {
+             if (zhilianPage == null) {
+                 throw new IllegalStateException("智联招聘页面未初始化");
+@@ -1198,7 +1734,7 @@ public class PlaywrightManager {
+      * 主动保存智联招聘Cookie到数据库（用于调试/验证）
+      */
+     public void saveZhilianCookiesToDb(String remark) {
+-        saveZhilianCookiesToDatabase(remark);
++        withPlaywrightAccess(() -> saveZhilianCookiesToDatabase(remark));
+     }
+ 
+     /**
+@@ -1208,6 +1744,10 @@ public class PlaywrightManager {
+      * @param remark   备注
+      */
+     public void saveCookiesToDb(String platform, String remark) {
++        withPlaywrightAccess(() -> saveCookiesToDbInternal(platform, remark));
++    }
++
++    private void saveCookiesToDbInternal(String platform, String remark) {
+         switch (platform) {
+             case "boss" -> saveBossCookiesToDatabase(remark);
+             case "liepin" -> saveLiepinCookiesToDatabase(remark);
+@@ -1221,6 +1761,10 @@ public class PlaywrightManager {
+      * 清理智联招聘上下文中的Cookie
+      */
+     public void clearZhilianCookies() {
++        withPlaywrightAccess(this::clearZhilianCookiesInternal);
++    }
++
++    private void clearZhilianCookiesInternal() {
+         try {
+             if (context != null) {
+                 context.clearCookies();
+@@ -1305,13 +1849,17 @@ public class PlaywrightManager {
+      * 主动保存猎聘Cookie到数据库（用于调试/验证）
+      */
+     public void saveLiepinCookiesToDb(String remark) {
+-        saveLiepinCookiesToDatabase(remark);
++        withPlaywrightAccess(() -> saveLiepinCookiesToDatabase(remark));
+     }
+ 
+     /**
+      * 清理猎聘上下文中的Cookie
+      */
+     public void clearLiepinCookies() {
++        withPlaywrightAccess(this::clearLiepinCookiesInternal);
++    }
++
++    private void clearLiepinCookiesInternal() {
+         try {
+             if (context != null) {
+                 context.clearCookies();
+@@ -1405,7 +1953,7 @@ public class PlaywrightManager {
+      * 主动保存 Boss Cookie 到数据库（用于调试/验证）
+      */
+     public void saveBossCookiesToDb(String remark) {
+-        saveBossCookiesToDatabase(remark);
++        withPlaywrightAccess(() -> saveBossCookiesToDatabase(remark));
+     }
+ 
+     /**
+@@ -1413,6 +1961,10 @@ public class PlaywrightManager {
+      * 用于退出登录时清除浏览器上下文中的所有Cookie
+      */
+     public void clearBossCookies() {
++        withPlaywrightAccess(this::clearBossCookiesInternal);
++    }
++
++    private void clearBossCookiesInternal() {
+         try {
+             if (context != null) {
+                 context.clearCookies();
+@@ -1432,7 +1984,13 @@ public class PlaywrightManager {
+      */
+     @Scheduled(fixedDelay = 3000)
+     public void scheduledLoginCheck() {
++        if (!playwrightAccessLock.tryLock()) {
++            return;
++        }
+         try {
++            if (bossHandsOffLoginActive || !playwrightAttached) {
++                return;
++            }
+             if (liepinPage != null && !liepinMonitoringPaused) {
+                 checkLiepinLoginStatus(liepinPage);
+             }
+@@ -1448,6 +2006,8 @@ public class PlaywrightManager {
+             }
+         } catch (Exception e) {
+             log.debug("定时登录检测异常: {}", e.getMessage());
++        } finally {
++            playwrightAccessLock.unlock();
+         }
+     }
+ 
+@@ -1502,9 +2062,18 @@ public class PlaywrightManager {
+ 
+             // 关闭浏览器
+             if (browser != null) {
+-                browser.close();
+-                log.info("浏览器已关闭");
++                try {
++                    browser.close();
++                    log.info("浏览器已关闭 (cdpAttached={})", connectedOverCdp);
++                } catch (Exception e) {
++                    log.debug("关闭 browser 失败: {}", e.getMessage());
++                }
+             }
++            destroyManagedChromeQuietly();
++            connectedOverCdp = false;
++            playwrightAttached = false;
++            bossHandsOffLoginActive = false;
++            initializationComplete = false;
+             if (playwright != null) {
+                 playwright.close();
+                 log.info("Playwright实例已关闭");
+@@ -1520,9 +2089,24 @@ public class PlaywrightManager {
+      * 检查Playwright是否已初始化
+      */
+     public boolean isInitialized() {
+-        return playwright != null && browser != null && bossPage != null;
++        if (bossHandsOffLoginActive && isCdpReachable(CDP_PORT)) {
++            return true;
++        }
++        return playwright != null
++                && playwrightAttached
++                && browser != null
++                && browser.isConnected()
++                && context != null
++                && bossPage != null
++                && !bossPage.isClosed();
++    }
++
++    /** 是否处于 Boss hands-off 登录（Playwright 已 detach） */
++    public boolean isBossHandsOffLoginActive() {
++        return bossHandsOffLoginActive;
+     }
+ 
++
+     /**
+      * 获取CDP端口号
+      */
+@@ -1530,6 +2114,376 @@ public class PlaywrightManager {
+         return CDP_PORT;
+     }
+ 
++    /**
++     * Boss hands-off 登录：
++     * 1) 断开 Playwright CDP（不杀 Chrome）
++     * 2) HTTP /json/new 打开登录页（无 Playwright/WS 控制）
++     * 3) 轮询登录结果后重新 connectOverCDP 并恢复四平台 Page
++     */
++    private void startBossHandsOffLogin() {
++        if (!connectedOverCdp) {
++            log.warn("hands-off 登录仅支持系统 Chrome CDP 模式");
++            return;
++        }
++        if (!bossHandsOffLoginGate.compareAndSet(false, true)) {
++            log.info("Boss hands-off 登录已在进行中，跳过重复触发");
++            return;
++        }
++        try {
++            synchronized (cdpLifecycleLock) {
++                if (playwrightAttached && browser != null) {
++                    detachPlaywrightKeepChromeForBossLogin();
++                } else {
++                    bossHandsOffLoginActive = true;
++                    pauseAllPlatformMonitoring();
++                    log.info("Playwright 已处于 detach 状态，直接打开登录页");
++                }
++            }
++
++            String targetId = openUrlViaCdpJsonNew(BOSS_LOGIN_URL);
++            if (targetId == null) {
++                log.error("CDP /json/new 打开 Boss 登录页失败，尝试重连 Playwright");
++                reconnectPlaywrightAfterHandsOff("json-new-failed");
++                return;
++            }
++            log.info("✓ hands-off 已打开 Boss 登录页 targetId={} url={}", targetId, BOSS_LOGIN_URL);
++            pollBossHandsOffLoginAndReconnect(targetId);
++        } catch (Exception e) {
++            log.error("Boss hands-off 登录流程异常: {}", e.getMessage(), e);
++            try {
++                reconnectPlaywrightAfterHandsOff("hands-off-error");
++            } catch (Exception ex) {
++                log.error("hands-off 异常后重连失败: {}", ex.getMessage(), ex);
++            }
++        } finally {
++            bossHandsOffLoginActive = false;
++            bossHandsOffLoginGate.set(false);
++        }
++    }
++
++    private void pauseAllPlatformMonitoring() {
++        bossMonitoringPaused = true;
++        liepinMonitoringPaused = true;
++        job51MonitoringPaused = true;
++        zhilianMonitoringPaused = true;
++    }
++
++    private void resumeAllPlatformMonitoring() {
++        bossMonitoringPaused = false;
++        liepinMonitoringPaused = false;
++        job51MonitoringPaused = false;
++        zhilianMonitoringPaused = false;
++    }
++
++    /**
++     * 断开 Playwright 对浏览器的控制，保留系统 Chrome + remote-debugging。
++     * 注意：仅在 connectOverCDP 路径安全；launch 路径的 browser.close() 会杀浏览器。
++     */
++    private void detachPlaywrightKeepChromeForBossLogin() {
++        log.info("开始 detach Playwright（保留 Chrome CDP :{}）以进行 Boss hands-off 登录...", CDP_PORT);
++        pauseAllPlatformMonitoring();
++        bossHandsOffLoginActive = true;
++
++        // 先摘引用，避免定时任务/业务在 close 过程中碰死对象
++        bossPage = null;
++        liepinPage = null;
++        job51Page = null;
++        zhilianPage = null;
++        context = null;
++
++        if (browser != null) {
++            try {
++                browser.close();
++                log.info("✓ Playwright browser.close() 完成（CDP 断开，Chrome 应仍存活）");
++            } catch (Exception e) {
++                log.warn("Playwright browser.close() 异常（可忽略）: {}", e.getMessage());
++            }
++            browser = null;
++        }
++        playwrightAttached = false;
++
++        if (!isCdpReachable(CDP_PORT)) {
++            throw new IllegalStateException("detach 后 CDP :" + CDP_PORT + " 不可达，Chrome 可能已退出");
++        }
++        log.info("✓ Chrome CDP 仍可达，hands-off 登录环境就绪");
++    }
++
++    /**
++     * 通过 Chrome DevTools HTTP 端点打开新标签（不建立 Playwright/CDP WebSocket）。
++     */
++    private String openUrlViaCdpJsonNew(String url) {
++        String encoded = URLEncoder.encode(url, StandardCharsets.UTF_8).replace("+", "%20");
++        String endpoint = "http://127.0.0.1:" + CDP_PORT + "/json/new?" + encoded;
++        // PUT 优先，失败再 GET
++        String body = httpRequestRaw(endpoint, "PUT", 8000);
++        if (body == null || body.isBlank()) {
++            body = httpRequestRaw(endpoint, "GET", 8000);
++        }
++        if (body == null || body.isBlank()) {
++            return null;
++        }
++        try {
++            com.fasterxml.jackson.databind.JsonNode node = new ObjectMapper().readTree(body);
++            if (node.has("id")) {
++                return node.get("id").asText();
++            }
++            log.warn("/json/new 响应无 id: {}", body.length() > 300 ? body.substring(0, 300) : body);
++            return "unknown";
++        } catch (Exception e) {
++            log.warn("解析 /json/new 响应失败: {} body={}", e.getMessage(),
++                    body.length() > 200 ? body.substring(0, 200) : body);
++            return "unknown";
++        }
++    }
++
++    private String httpRequestRaw(String url, String method, int timeoutMs) {
++        HttpURLConnection conn = null;
++        try {
++            conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
++            conn.setRequestMethod(method);
++            conn.setConnectTimeout(timeoutMs);
++            conn.setReadTimeout(timeoutMs);
++            if ("PUT".equalsIgnoreCase(method) || "POST".equalsIgnoreCase(method)) {
++                conn.setDoOutput(true);
++                conn.setFixedLengthStreamingMode(0);
++            }
++            int code = conn.getResponseCode();
++            InputStream in = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
++            if (in == null) {
++                return null;
++            }
++            try (InputStream stream = in) {
++                return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
++            }
++        } catch (Exception e) {
++            log.debug("HTTP {} {} 失败: {}", method, url, e.getMessage());
++            return null;
++        } finally {
++            if (conn != null) {
++                conn.disconnect();
++            }
++        }
++    }
++
++    private List<CdpPageInfo> listCdpPages() {
++        String body = httpRequestRaw("http://127.0.0.1:" + CDP_PORT + "/json/list", "GET", 3000);
++        List<CdpPageInfo> pages = new ArrayList<>();
++        if (body == null || body.isBlank()) {
++            return pages;
++        }
++        try {
++            com.fasterxml.jackson.databind.JsonNode arr = new ObjectMapper().readTree(body);
++            if (!arr.isArray()) {
++                return pages;
++            }
++            for (com.fasterxml.jackson.databind.JsonNode n : arr) {
++                String type = n.path("type").asText("");
++                if (!"page".equals(type)) {
++                    continue;
++                }
++                pages.add(new CdpPageInfo(
++                        n.path("id").asText(""),
++                        n.path("url").asText(""),
++                        n.path("title").asText("")
++                ));
++            }
++        } catch (Exception e) {
++            log.debug("解析 /json/list 失败: {}", e.getMessage());
++        }
++        return pages;
++    }
++
++    private void pollBossHandsOffLoginAndReconnect(String loginTargetId) {
++        long start = System.currentTimeMillis();
++        long lastStayLogMs = 0L;
++        boolean sawLoginPage = false;
++        boolean leftLoginPage = false;
++        int stableLoginTicks = 0;
++
++        log.info("开始轮询 Boss hands-off 登录状态（timeout={}ms）...", BOSS_HANDS_OFF_TIMEOUT_MS);
++        while (System.currentTimeMillis() - start < BOSS_HANDS_OFF_TIMEOUT_MS) {
++            if (!isCdpReachable(CDP_PORT)) {
++                log.error("hands-off 轮询中 CDP 不可达，中止");
++                break;
++            }
++            List<CdpPageInfo> pages = listCdpPages();
++            boolean onLogin = false;
++            boolean zhipinNonLogin = false;
++            for (CdpPageInfo p : pages) {
++                String u = p.url() == null ? "" : p.url();
++                if (!u.contains("zhipin.com")) {
++                    continue;
++                }
++                if (u.contains("/web/user")) {
++                    onLogin = true;
++                } else if (!u.startsWith("chrome://") && !u.equals("about:blank")) {
++                    zhipinNonLogin = true;
++                }
++            }
++
++            if (onLogin) {
++                sawLoginPage = true;
++                stableLoginTicks++;
++                long now = System.currentTimeMillis();
++                if (now - lastStayLogMs >= 10_000L) {
++                    log.info("Boss 登录页 hands-off 停留中... elapsed={}s stableTicks={} tabs={}",
++                            (now - start) / 1000, stableLoginTicks, pages.size());
++                    lastStayLogMs = now;
++                }
++                // 连续稳定停留视为 REV-001 方向通过（无 Playwright 控制）
++                if (stableLoginTicks == 8) {
++                    log.info("✓ Boss 登录页已稳定停留（≈16s+，无 Playwright 附着）");
++                }
++            } else if (sawLoginPage) {
++                leftLoginPage = true;
++                log.info("Boss 登录页已离开 /web/user（可能已扫码登录），准备重连 Playwright。zhipinNonLogin={}", zhipinNonLogin);
++                try {
++                    Thread.sleep(2000);
++                } catch (InterruptedException ie) {
++                    Thread.currentThread().interrupt();
++                }
++                break;
++            } else {
++                // 尚未看到登录页：给页面加载一点时间
++                if (System.currentTimeMillis() - start > 15_000L) {
++                    log.warn("15s 内未在 /json/list 看到 Boss 登录页，仍继续等待用户操作/重开");
++                    // 尝试再开一次
++                    openUrlViaCdpJsonNew(BOSS_LOGIN_URL);
++                    start = System.currentTimeMillis(); // 重置等待窗口
++                    sawLoginPage = false;
++                    stableLoginTicks = 0;
++                }
++            }
++
++            try {
++                Thread.sleep(2000);
++            } catch (InterruptedException ie) {
++                Thread.currentThread().interrupt();
++                break;
++            }
++        }
++
++        if (!leftLoginPage && sawLoginPage) {
++            log.info("Boss hands-off 登录等待结束（超时或人工未完成），重连 Playwright 以恢复自动化");
++        }
++        reconnectPlaywrightAfterHandsOff(leftLoginPage ? "left-login-page" : "timeout-or-idle");
++    }
++
++    private void reconnectPlaywrightAfterHandsOff(String reason) {
++        synchronized (cdpLifecycleLock) {
++            log.info("hands-off 后重连 Playwright，reason={} ...", reason);
++            if (!isCdpReachable(CDP_PORT)) {
++                log.error("无法重连：CDP :{} 不可达", CDP_PORT);
++                bossHandsOffLoginActive = false;
++                return;
++            }
++            if (playwright == null) {
++                playwright = Playwright.create();
++            }
++            browser = playwright.chromium().connectOverCDP("http://127.0.0.1:" + CDP_PORT);
++            connectedOverCdp = true;
++            playwrightAttached = true;
++            if (browser.contexts() != null && !browser.contexts().isEmpty()) {
++                context = browser.contexts().get(0);
++            } else {
++                context = browser.newContext(new Browser.NewContextOptions()
++                        .setViewportSize(null)
++                        .setLocale("zh-CN")
++                        .setTimezoneId("Asia/Shanghai"));
++            }
++            try {
++                context.setExtraHTTPHeaders(Map.of("Accept-Language", "zh-CN,zh;q=0.9"));
++            } catch (Exception ignored) {}
++
++            injectBossInitScript(context);
++            rebindPlatformPagesFromContext();
++            bossHandsOffLoginActive = false;
++            resumeAllPlatformMonitoring();
++
++            // 重新判定登录态；已登录则落库 Cookie。未登录不再自动二次 hands-off（避免死循环）
++            try {
++                boolean loggedIn = checkIfLoggedIn();
++                loginStatus.put("boss", loggedIn);
++                if (loggedIn) {
++                    log.info("✓ hands-off 后检测到 Boss 已登录，保存 Cookie");
++                    saveBossCookiesToDatabase("hands-off login success");
++                    LoginStatusChange change = new LoginStatusChange("boss", true, System.currentTimeMillis());
++                    loginStatusListeners.forEach(listener -> {
++                        try {
++                            listener.accept(change);
++                        } catch (Exception e) {
++                            log.error("通知登录状态监听器失败", e);
++                        }
++                    });
++                } else {
++                    log.info("hands-off 后 Boss 仍未登录（用户可能尚未扫码）。浏览器已恢复，可稍后再次触发退出/登录引导");
++                }
++            } catch (Exception e) {
++                log.warn("hands-off 重连后检查登录态失败: {}", e.getMessage());
++            }
++            log.info("✓ Playwright 已重连并恢复平台 Page 引用 (version={})", safeBrowserVersion());
++        }
++    }
++
++    private void rebindPlatformPagesFromContext() {
++        List<Page> existing = new ArrayList<>();
++        try {
++            if (context.pages() != null) {
++                existing.addAll(context.pages());
++            }
++        } catch (Exception e) {
++            log.debug("读取 context.pages 失败: {}", e.getMessage());
++        }
++        Set<Page> claimed = new HashSet<>();
++        bossPage = findOrCreatePage(existing, claimed, "zhipin.com");
++        liepinPage = findOrCreatePage(existing, claimed, "liepin.com");
++        job51Page = findOrCreatePage(existing, claimed, "51job.com");
++        zhilianPage = findOrCreatePage(existing, claimed, "zhaopin.com");
++
++        bossPage.setDefaultTimeout(DEFAULT_TIMEOUT);
++        liepinPage.setDefaultTimeout(DEFAULT_TIMEOUT);
++        job51Page.setDefaultTimeout(DEFAULT_TIMEOUT);
++        zhilianPage.setDefaultTimeout(DEFAULT_TIMEOUT);
++
++        // 重新挂监控（重连后的 Page 是新包装对象）
++        setupLoginMonitoring(bossPage);
++        setupLiepinLoginMonitoring(liepinPage);
++        setup51jobLoginMonitoring(job51Page);
++        setupZhilianLoginMonitoring(zhilianPage);
++        log.info("已重绑定平台 Page: boss={}, liepin={}, 51job={}, zhilian={}",
++                safePageUrl(bossPage), safePageUrl(liepinPage), safePageUrl(job51Page), safePageUrl(zhilianPage));
++    }
++
++    private Page findOrCreatePage(List<Page> existing, Set<Page> claimed, String domainHint) {
++        for (Page p : existing) {
++            if (p == null || claimed.contains(p)) {
++                continue;
++            }
++            try {
++                String u = p.url();
++                if (u != null && u.contains(domainHint)) {
++                    claimed.add(p);
++                    return p;
++                }
++            } catch (Exception ignored) {
++            }
++        }
++        Page created = context.newPage();
++        claimed.add(created);
++        return created;
++    }
++
++    private String safePageUrl(Page page) {
++        try {
++            return page != null ? page.url() : "null";
++        } catch (Exception e) {
++            return "<unreadable>";
++        }
++    }
++
++    private record CdpPageInfo(String id, String url, String title) {}
++
++
+     /**
+      * 注册登录状态监听器
+      *
+@@ -1571,50 +2525,6 @@ public class PlaywrightManager {
+         if (previousStatus == null || previousStatus != isLoggedIn) {
+             loginStatus.put(platform, isLoggedIn);
+ 
+-            // Boss平台：在设置未登录状态时，顺带引导到登录页并切换二维码扫码
+-            if ("boss".equals(platform) && !isLoggedIn) {
+-                try {
+-                    if (bossPage != null) {
+-                        String currentUrl = null;
+-                        try { currentUrl = bossPage.url(); } catch (Exception ignored) {}
+-
+-                        // 避免重复导航：若当前已在登录页则不再二次跳转
+-                        if (currentUrl == null || !currentUrl.contains("/web/user/")) {
+-                            bossPage.navigate(BOSS_URL + "/web/user/?ka=header-login");
+-                            try { Thread.sleep(800); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+-                        }
+-
+-                        // 尝试切换到二维码登录（点击“APP扫码登录”按钮），优先使用新版选择器
+-                        try {
+-                            Locator qrSwitch = bossPage.locator(".btn-sign-switch.ewm-switch").first();
+-                            if (qrSwitch.isVisible()) {
+-                                qrSwitch.click();
+-                            } else {
+-                                // 兜底：按文本匹配内部提示
+-                                Locator tip = bossPage.getByText("APP扫码登录").first();
+-                                if (tip.isVisible()) {
+-                                    tip.click();
+-                                    log.info("已点击包含文本的二维码登录切换提示（APP扫码登录）");
+-                                } else {
+-                                    // 兼容旧版选择器
+-                                    Locator legacy = bossPage.locator("li.sign-switch-tip").first();
+-                                    if (legacy.isVisible()) {
+-                                        legacy.click();
+-                                        log.info("已通过旧版选择器切换二维码登录（li.sign-switch-tip）");
+-                                    } else {
+-                                        log.info("未找到二维码登录切换按钮，保持当前登录页");
+-                                    }
+-                                }
+-                            }
+-                        } catch (Exception e) {
+-                            log.debug("切换二维码登录失败: {}", e.getMessage());
+-                        }
+-                    }
+-                } catch (Exception e) {
+-                    log.debug("设置Boss未登录状态时执行登录引导失败: {}", e.getMessage());
+-                }
+-            }
+-
+             // 通知所有监听器（触发SSE推送）
+             LoginStatusChange change = new LoginStatusChange(platform, isLoggedIn, System.currentTimeMillis());
+             loginStatusListeners.forEach(listener -> {
+@@ -1624,11 +2534,222 @@ public class PlaywrightManager {
+                     log.error("通知登录状态监听器失败: platform={}, isLoggedIn={}", platform, isLoggedIn, e);
+                 }
+             });
++        }
+ 
+-//            log.info("登录状态已更新: platform={}, isLoggedIn={}", platform, isLoggedIn);
++        // Boss 使用 Cookie 导入登录：未登录时不再自动 hands-off / 导航登录页
++        if ("boss".equals(platform) && !isLoggedIn) {
++            log.info("Boss 标记未登录；请通过 /api/cookie/import 导入 Cookie 完成登录");
+         }
+     }
+ 
++    /**
++     * 导入平台 Cookie：落库 + 注入当前浏览器上下文，并刷新对应页面检测登录态。
++     * 支持 Playwright/EditThisCookie JSON 数组，或浏览器 Cookie 请求头格式（name=value; a=b）。
++     */
++    public Map<String, Object> importCookies(String platform, String cookieRaw, String remark) {
++        playwrightAccessLock.lock();
++        try {
++            return importCookiesInternal(platform, cookieRaw, remark);
++        } finally {
++            playwrightAccessLock.unlock();
++        }
++    }
++
++    private Map<String, Object> importCookiesInternal(String platform, String cookieRaw, String remark) {
++        Map<String, Object> result = new HashMap<>();
++        if (platform == null || platform.isBlank()) {
++            throw new IllegalArgumentException("platform 不能为空");
++        }
++        if (cookieRaw == null || cookieRaw.isBlank()) {
++            throw new IllegalArgumentException("cookie_value 不能为空");
++        }
++        if (bossHandsOffLoginActive || !playwrightAttached || context == null) {
++            throw new IllegalStateException("浏览器未就绪或 Playwright 未附着，请稍后再导入 Cookie");
++        }
++
++        String domain = domainForPlatform(platform);
++        List<Cookie> cookies = parseCookiesFlexible(cookieRaw, domain);
++        cookies = filterCookiesByDomain(cookies, domain);
++        if (cookies.isEmpty()) {
++            throw new IllegalArgumentException("未能解析出有效 Cookie，请粘贴 JSON 数组或 name=value; 格式");
++        }
++
++        try {
++            ObjectMapper om = new ObjectMapper();
++            String normalizedJson = om.writeValueAsString(cookiesToMaps(cookies));
++            boolean saved = cookieService.saveOrUpdateCookie(platform, normalizedJson,
++                    remark == null || remark.isBlank() ? "manual import" : remark);
++            if (!saved) {
++                throw new IllegalStateException("Cookie 写入数据库失败");
++            }
++            context.addCookies(cookies);
++            log.info("已导入并注入 {} Cookie，共 {} 条", platform, cookies.size());
++        } catch (IllegalArgumentException | IllegalStateException e) {
++            throw e;
++        } catch (Exception e) {
++            throw new RuntimeException("导入 Cookie 失败: " + e.getMessage(), e);
++        }
++
++        boolean loggedIn = false;
++        try {
++            loggedIn = refreshPlatformAfterCookieImport(platform);
++        } catch (Exception e) {
++            log.warn("导入 Cookie 后刷新/检测登录态失败: {}", e.getMessage());
++        }
++
++        result.put("platform", platform);
++        result.put("count", cookies.size());
++        result.put("loggedIn", loggedIn);
++        return result;
++    }
++
++    private String domainForPlatform(String platform) {
++        return switch (platform) {
++            case "boss" -> BOSS_DOMAIN;
++            case "liepin" -> LIEPIN_DOMAIN;
++            case "51job" -> JOB51_DOMAIN;
++            case "zhilian" -> ZHILIAN_DOMAIN;
++            default -> throw new IllegalArgumentException("不支持的平台: " + platform);
++        };
++    }
++
++    private boolean refreshPlatformAfterCookieImport(String platform) {
++        return switch (platform) {
++            case "boss" -> {
++                if (bossPage != null) {
++                    try {
++                        bossPage.navigate(BOSS_URL, new Page.NavigateOptions()
++                                .setTimeout(60000)
++                                .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++                        try { bossPage.waitForLoadState(LoadState.NETWORKIDLE); } catch (Exception ignored) {}
++                    } catch (Exception e) {
++                        log.warn("Boss 导入 Cookie 后导航失败: {}", e.getMessage());
++                    }
++                }
++                boolean ok = checkIfLoggedIn();
++                Boolean previous = loginStatus.get("boss");
++                loginStatus.put("boss", ok);
++                if (previous == null || previous != ok) {
++                    LoginStatusChange change = new LoginStatusChange("boss", ok, System.currentTimeMillis());
++                    loginStatusListeners.forEach(listener -> {
++                        try { listener.accept(change); } catch (Exception e) {
++                            log.error("通知登录状态监听器失败", e);
++                        }
++                    });
++                }
++                if (ok) {
++                    saveBossCookiesToDatabase("cookie import login success");
++                }
++                yield ok;
++            }
++            case "liepin" -> {
++                if (liepinPage != null) {
++                    try {
++                        liepinPage.navigate(LIEPIN_URL, new Page.NavigateOptions()
++                                .setTimeout(60000)
++                                .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++                    } catch (Exception e) {
++                        log.warn("猎聘导入 Cookie 后导航失败: {}", e.getMessage());
++                    }
++                }
++                boolean ok = checkIfLiepinLoggedIn();
++                setLoginStatus("liepin", ok);
++                if (ok) saveLiepinCookiesToDatabase("cookie import login success");
++                yield ok;
++            }
++            case "51job" -> {
++                if (job51Page != null) {
++                    try {
++                        job51Page.navigate(JOB51_URL, new Page.NavigateOptions()
++                                .setTimeout(60000)
++                                .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++                    } catch (Exception e) {
++                        log.warn("51job 导入 Cookie 后导航失败: {}", e.getMessage());
++                    }
++                }
++                boolean ok = checkIf51jobLoggedIn();
++                setLoginStatus("51job", ok);
++                if (ok) save51jobCookiesToDatabase("cookie import login success");
++                yield ok;
++            }
++            case "zhilian" -> {
++                if (zhilianPage != null) {
++                    try {
++                        zhilianPage.navigate(ZHILIAN_URL, new Page.NavigateOptions()
++                                .setTimeout(60000)
++                                .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++                    } catch (Exception e) {
++                        log.warn("智联导入 Cookie 后导航失败: {}", e.getMessage());
++                    }
++                }
++                boolean ok = checkIfZhilianLoggedIn();
++                setLoginStatus("zhilian", ok);
++                if (ok) saveZhilianCookiesToDatabase("cookie import login success");
++                yield ok;
++            }
++            default -> false;
++        };
++    }
++
++    private List<Map<String, Object>> cookiesToMaps(List<Cookie> cookies) {
++        List<Map<String, Object>> list = new ArrayList<>();
++        for (Cookie c : cookies) {
++            Map<String, Object> m = new LinkedHashMap<>();
++            m.put("name", c.name);
++            m.put("value", c.value);
++            if (c.domain != null) m.put("domain", c.domain);
++            if (c.path != null) m.put("path", c.path);
++            // expires 为 double 原始类型：-1 表示会话 cookie
++            m.put("expires", c.expires);
++            m.put("httpOnly", c.httpOnly);
++            m.put("secure", c.secure);
++            if (c.sameSite != null) m.put("sameSite", c.sameSite.name());
++            list.add(m);
++        }
++        return list;
++    }
++
++    /**
++     * 灵活解析 Cookie：JSON 数组 或 header 字符串。缺 domain 时填默认 domain。
++     */
++    private List<Cookie> parseCookiesFlexible(String raw, String defaultDomain) {
++        String s = raw == null ? "" : raw.trim();
++        if (s.isEmpty()) return new ArrayList<>();
++
++        if (s.startsWith("[")) {
++            List<Cookie> fromJson = parseCookiesFromString(s);
++            for (Cookie c : fromJson) {
++                if (c.domain == null || c.domain.isBlank()) {
++                    c.domain = defaultDomain.startsWith(".") ? defaultDomain : "." + defaultDomain;
++                }
++                if (c.path == null || c.path.isBlank()) {
++                    c.path = "/";
++                }
++            }
++            return fromJson;
++        }
++
++        List<Cookie> cookies = new ArrayList<>();
++        String domain = defaultDomain.startsWith(".") ? defaultDomain : "." + defaultDomain;
++        for (String part : s.split(";")) {
++            String p = part.trim();
++            if (p.isEmpty() || !p.contains("=")) continue;
++            int eq = p.indexOf('=');
++            String name = p.substring(0, eq).trim();
++            String value = p.substring(eq + 1).trim();
++            if (name.isEmpty()) continue;
++            String lower = name.toLowerCase(Locale.ROOT);
++            if (Set.of("path", "domain", "expires", "max-age", "secure", "httponly", "samesite").contains(lower)) {
++                continue;
++            }
++            Cookie cookie = new Cookie(name, value);
++            cookie.domain = domain;
++            cookie.path = "/";
++            cookies.add(cookie);
++        }
++        return cookies;
++    }
++
+     /**
+      * 从JSON字符串解析Cookie列表
+      *
+@@ -1668,11 +2789,14 @@ public class PlaywrightManager {
+                 if (node.has("sameSite") && !node.get("sameSite").isNull()) {
+                     String sameSite = node.get("sameSite").asText();
+                     if (sameSite != null && !sameSite.isEmpty()) {
+-                        cookie.sameSite = com.microsoft.playwright.options.SameSiteAttribute.valueOf(
+-                                sameSite.toUpperCase()
+-                        );
++                        cookie.sameSite = mapSameSite(sameSite);
+                     }
+                 }
++                // EditThisCookie 等导出使用 expirationDate（秒）
++                if ((!node.has("expires") || node.get("expires").isNull())
++                        && node.has("expirationDate") && !node.get("expirationDate").isNull()) {
++                    cookie.expires = node.get("expirationDate").asDouble();
++                }
+ 
+                 cookies.add(cookie);
+             }
+@@ -1685,6 +2809,27 @@ public class PlaywrightManager {
+         return cookies;
+     }
+ 
++
++    private com.microsoft.playwright.options.SameSiteAttribute mapSameSite(String raw) {
++        if (raw == null || raw.isBlank()) {
++            return null;
++        }
++        String s = raw.trim().toLowerCase(Locale.ROOT).replace("-", "_");
++        return switch (s) {
++            case "strict" -> com.microsoft.playwright.options.SameSiteAttribute.STRICT;
++            case "lax" -> com.microsoft.playwright.options.SameSiteAttribute.LAX;
++            case "none", "no_restriction", "unspecified" -> com.microsoft.playwright.options.SameSiteAttribute.NONE;
++            default -> {
++                try {
++                    yield com.microsoft.playwright.options.SameSiteAttribute.valueOf(s.toUpperCase(Locale.ROOT));
++                } catch (Exception e) {
++                    log.debug("未知 sameSite={}，忽略该字段", raw);
++                    yield null;
++                }
++            }
++        };
++    }
++
+     private List<Cookie> filterCookiesByDomain(List<Cookie> cookies, String domainSuffix) {
+         if (cookies == null || cookies.isEmpty()) {
+             return new ArrayList<>();
+diff --git a/src/main/java/com/getjobs/worker/service/Job51JobService.java b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+index 291db06..bf166ef 100644
+--- a/src/main/java/com/getjobs/worker/service/Job51JobService.java
++++ b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+@@ -36,14 +36,18 @@ public class Job51JobService implements JobPlatformService {
+ 
+     @Override
+     public void executeDelivery(Consumer<JobProgressMessage> progressCallback) {
++        playwrightManager.withPlaywrightAccess(() -> executeDeliveryInternal(progressCallback));
++    }
++
++    private void executeDeliveryInternal(Consumer<JobProgressMessage> progressCallback) {
+         if (isRunning) {
+             progressCallback.accept(JobProgressMessage.warning(PLATFORM, "任务已在运行中"));
+             return;
+         }
+ 
+         try {
+-            // 获取51job页面实例
+-            Page page = playwrightManager.getJob51Page();
++            // 获取可用的51job页面；Page/Context失效时由管理器重连或重建
++            Page page = playwrightManager.ensureJob51PageReady();
+             if (page == null) {
+                 progressCallback.accept(JobProgressMessage.error(PLATFORM, "51job页面未初始化"));
+                 return;
+@@ -89,12 +93,24 @@ public class Job51JobService implements JobPlatformService {
+             job51.setConfig(config);
+             job51.setProgressCallback(job51Callback);
+             job51.setShouldStopCallback(this::shouldStop);
++            job51.setPageRecovery(playwrightManager::ensureJob51PageReady);
+             job51.prepare();
+ 
+             int deliveredCount = job51.execute();
+ 
+-            progressCallback.accept(JobProgressMessage.success(PLATFORM,
+-                String.format("投递任务完成，共投递%d个职位", deliveredCount)));
++            if (job51.getExecutionError() != null) {
++                progressCallback.accept(JobProgressMessage.error(PLATFORM,
++                    "投递失败: " + job51.getExecutionError()));
++            } else if ("user_cancelled".equals(job51.getStopReason())) {
++                progressCallback.accept(JobProgressMessage.warning(PLATFORM,
++                    String.format("投递已停止，已确认成功%d个职位", deliveredCount)));
++            } else if ("daily_limit".equals(job51.getStopReason())) {
++                progressCallback.accept(JobProgressMessage.warning(PLATFORM,
++                    String.format("检测到日投递上限，已确认成功%d个职位", deliveredCount)));
++            } else {
++                progressCallback.accept(JobProgressMessage.success(PLATFORM,
++                    String.format("投递任务完成，已确认成功%d个职位", deliveredCount)));
++            }
+         } catch (Exception e) {
+             log.error("51job投递任务执行失败", e);
+             progressCallback.accept(JobProgressMessage.error(PLATFORM, "投递失败: " + e.getMessage()));
+diff --git a/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java b/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
+new file mode 100644
+index 0000000..2deeef4
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
+@@ -0,0 +1,36 @@
++package com.getjobs.worker.job51;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
++class Job51BehaviorTest {
++
++    @Test
++    void pageNumberMatchingIsExact() {
++        assertTrue(Job51.pageNumberMatches(" 2 ", 2));
++        assertFalse(Job51.pageNumberMatches("12", 2));
++    }
++
++    @Test
++    void confirmedCountNeverExceedsSelectedJobs() {
++        assertEquals(3, Job51.confirmedInfoCount(5, 3));
++        assertEquals(0, Job51.confirmedInfoCount(-1, 3));
++    }
++
++    @Test
++    void closedTargetErrorsAreRecognized() {
++        assertTrue(Job51.isTargetClosedFailure(
++                new IllegalStateException("Target page, context or browser has been closed")));
++        assertFalse(Job51.isTargetClosedFailure(new IllegalStateException("network timeout")));
++    }
++
++    @Test
++    void deliveryCountParsesNumericAndGenericSuccessFeedback() {
++        assertEquals(3, Job51.parseDeliveryCount("投递成功 3 个，未投递 1 个", "投递成功"));
++        assertEquals(1, Job51.parseDeliveryCount("投递成功 3 个，未投递 1 个", "未投递"));
++        assertEquals(null, Job51.parseDeliveryCount("投递成功！", "投递成功"));
++    }
++}

@@ -1,0 +1,138 @@
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index 3254f12..6b8b438 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -25,10 +25,8 @@ import org.springframework.beans.factory.annotation.Autowired;
+ // 移除保存页面源码相关的导入
+ import java.util.ArrayList;
+ import java.util.Date;
+-import java.util.HashSet;
+ import java.util.List;
+ import java.util.Locale;
+-import java.util.Set;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.function.Consumer;
+@@ -68,8 +66,6 @@ public class Liepin {
+     private int maxPage = 50;
+     private final List<String> resultList = new ArrayList<>();
+     private final List<LiepinEntity> lastApiEntities = new ArrayList<>();
+-    private int processedCount;
+-    private final Set<Long> countedJobIds = new HashSet<>();
+     private LiepinRateGuard rateGuard;
+     @Setter
+     private LiepinConfig config;
+@@ -145,8 +141,6 @@ public class Liepin {
+         this.startDate = new Date();
+         this.resultList.clear();
+         lastApiEntities.clear();
+-        processedCount = 0;
+-        countedJobIds.clear();
+         this.rateGuard = LiepinRateGuard.production(
+                 this::shouldStop,
+                 this::info,
+@@ -213,8 +207,8 @@ public class Liepin {
+                     throw failure;
+                 }
+             }
+-            if (processedCount >= config.effectiveMaxPerRun()) {
+-                info(String.format("已达到本次任务上限%d个岗位，结束全部关键词", config.effectiveMaxPerRun()));
++            if (resultList.size() >= config.effectiveMaxPerRun()) {
++                info(String.format("已达到本次成功聊天上限%d个，结束全部关键词", config.effectiveMaxPerRun()));
+                 break;
+             }
+         }
+@@ -660,8 +654,8 @@ public class Liepin {
+                 info("收到停止指令，结束卡片遍历");
+                 return PageScanResult.STOPPED;
+             }
+-            if (processedCount >= config.effectiveMaxPerRun()) {
+-                info(String.format("已达到本次任务上限%d个岗位", config.effectiveMaxPerRun()));
++            if (resultList.size() >= config.effectiveMaxPerRun()) {
++                info(String.format("已达到本次成功聊天上限%d个", config.effectiveMaxPerRun()));
+                 return PageScanResult.LIMIT_REACHED;
+             }
+             // 获取当前岗位卡片（用于后续操作与缺省展示）
+@@ -883,9 +877,6 @@ public class Liepin {
+                 continue;
+             }
+ 
+-            if (apiEntity.getJobId() == null || countedJobIds.add(apiEntity.getJobId())) {
+-                processedCount++;
+-            }
+             if (shouldStop()) {
+                 info("收到停止指令，结束当前岗位处理");
+                 return PageScanResult.STOPPED;
+@@ -969,6 +960,10 @@ public class Liepin {
+                                         ? (sendResult.resumeApplied() ? "AI话术和猎聘简历" : "AI话术")
+                                         : "猎聘预设语"));
+                         if (!rateGuard.afterSuccessfulSend()) return PageScanResult.STOPPED;
++                        if (resultList.size() >= config.effectiveMaxPerRun()) {
++                            info(String.format("已达到本次成功聊天上限%d个", config.effectiveMaxPerRun()));
++                            return PageScanResult.LIMIT_REACHED;
++                        }
+                     } else {
+                         info(String.format("【%s】【%s】发送状态不确定，未更新已投递状态", companyName, jobName));
+                     }
+
+diff --git a/src/main/java/com/getjobs/worker/service/LiepinJobService.java b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+index 372853e..b3be562 100644
+--- a/src/main/java/com/getjobs/worker/service/LiepinJobService.java
++++ b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+@@ -50,6 +50,14 @@ public class LiepinJobService implements JobPlatformService {
+     public record ConfirmationResult(boolean accepted, String message) {
+     }
+ 
++    static JobProgressMessage buildCompletionMessage(int deliveredCount) {
++        if (deliveredCount > 0) {
++            return JobProgressMessage.success(PLATFORM,
++                    String.format("投递任务完成，共发起%d个聊天", deliveredCount));
++        }
++        return JobProgressMessage.warning(PLATFORM, "投递任务完成，本轮未成功发起聊天");
++    }
++
+     @Override
+     public void executeDelivery(Consumer<JobProgressMessage> progressCallback) {
+         playwrightManager.withPlaywrightAccess(() -> executeDeliveryInternal(progressCallback));
+@@ -107,8 +115,7 @@ public class LiepinJobService implements JobPlatformService {
+ 
+             int deliveredCount = liepin.execute();
+ 
+-            publish(progressCallback, JobProgressMessage.success(PLATFORM,
+-                String.format("投递任务完成，共发起%d个聊天", deliveredCount)));
++            publish(progressCallback, buildCompletionMessage(deliveredCount));
+         } catch (Liepin.PageLifecycleException e) {
+             log.error("猎聘投递任务因页面生命周期中断", e);
+             String message = e.sideEffectStarted()
+
+diff --git a/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+new file mode 100644
+index 0000000..95f9ada
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+@@ -0,0 +1,25 @@
++package com.getjobs.worker.service;
++
++import com.getjobs.worker.dto.JobProgressMessage;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
++class LiepinJobServiceDeliveryTest {
++
++    @Test
++    void zeroConfirmedChatsAreReportedAsWarning() {
++        JobProgressMessage message = LiepinJobService.buildCompletionMessage(0);
++
++        assertEquals("warning", message.getType());
++        assertEquals("投递任务完成，本轮未成功发起聊天", message.getMessage());
++    }
++
++    @Test
++    void confirmedChatsKeepSuccessStatusAndCount() {
++        JobProgressMessage message = LiepinJobService.buildCompletionMessage(2);
++
++        assertEquals("success", message.getType());
++        assertEquals("投递任务完成，共发起2个聊天", message.getMessage());
++    }
++}

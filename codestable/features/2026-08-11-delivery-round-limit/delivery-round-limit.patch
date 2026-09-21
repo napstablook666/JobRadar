@@ -1,0 +1,1167 @@
+diff --git a/front/app/51job/page.tsx b/front/app/51job/page.tsx
+index ecb8e92..7b9d1dd 100644
+--- a/front/app/51job/page.tsx
++++ b/front/app/51job/page.tsx
+@@ -22,0 +23,3 @@ interface Job51Config {
++  stopAfterMaxPerRun?: number
++  maxPerRunRestMinSeconds?: number
++  maxPerRunRestMaxSeconds?: number
+@@ -41,0 +45,4 @@ const MAX_AI_DELAY_SECONDS = 300
++const MIN_MAX_PER_RUN_REST_SECONDS = 30
++const MAX_MAX_PER_RUN_REST_SECONDS = 300
++const DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS = 30
++const DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS = 60
+@@ -134,0 +142,29 @@ const normalizeRestConfig = (value: Job51Config) => {
++const normalizeMaxPerRunRestConfig = (value: Job51Config) => {
++  const minValue = Number(value.maxPerRunRestMinSeconds)
++  const min = Math.min(
++    MAX_MAX_PER_RUN_REST_SECONDS,
++    Math.max(
++      MIN_MAX_PER_RUN_REST_SECONDS,
++      Number.isFinite(minValue) ? minValue : DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS,
++    ),
++  )
++  const maxValue = Number(value.maxPerRunRestMaxSeconds)
++  const max = Math.min(
++    MAX_MAX_PER_RUN_REST_SECONDS,
++    Math.max(
++      min,
++      Number.isFinite(maxValue) ? maxValue : DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS,
++    ),
++  )
++  return {
++    stopAfterMaxPerRun: value.stopAfterMaxPerRun === 0 ? 0 : 1,
++    maxPerRunRestMinSeconds: min,
++    maxPerRunRestMaxSeconds: max,
++  }
++}
++
++const normalizeMaxPerRun = (value: number | undefined, fallback = 10): number => {
++  const parsed = Number(value)
++  return Math.max(0, Number.isFinite(parsed) ? parsed : fallback)
++}
++
+@@ -173,0 +210,3 @@ export default function Job51Page() {
++    stopAfterMaxPerRun: 1,
++    maxPerRunRestMinSeconds: DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS,
++    maxPerRunRestMaxSeconds: DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS,
+@@ -440,0 +480 @@ export default function Job51Page() {
++        const maxPerRunRest = normalizeMaxPerRunRestConfig(conf)
+@@ -447 +487,2 @@ export default function Job51Page() {
+-          maxPerRun: conf.maxPerRun ?? 10,
++          maxPerRun: normalizeMaxPerRun(conf.maxPerRun),
++          ...maxPerRunRest,
+@@ -662,0 +704 @@ export default function Job51Page() {
++      const maxPerRunRest = normalizeMaxPerRunRestConfig(config)
+@@ -669 +711,2 @@ export default function Job51Page() {
+-        maxPerRun: Math.min(10, Math.max(1, Number(config.maxPerRun) || 10)),
++        maxPerRun: normalizeMaxPerRun(config.maxPerRun),
++        ...maxPerRunRest,
+@@ -1006 +1049 @@ export default function Job51Page() {
+-                  <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
++                  <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-4">
+@@ -1012,2 +1055 @@ export default function Job51Page() {
+-                        min={1}
+-                        max={10}
++                        min={0}
+@@ -1018 +1060,43 @@ export default function Job51Page() {
+-                      <p className="text-xs text-muted-foreground">最多10个岗位</p>
++                      <p className="text-xs text-muted-foreground">0 表示不设置最大值</p>
++                    </div>
++                    <div className="space-y-2">
++                      <Label htmlFor="job51-stop-after-max">达到上限后</Label>
++                      <label className="flex h-10 items-center gap-3 rounded-md border px-3 text-sm">
++                        <input
++                          id="job51-stop-after-max"
++                          type="checkbox"
++                          checked={config.stopAfterMaxPerRun !== 0}
++                          disabled={config.enableAi !== 1 || config.maxPerRun === 0}
++                          onChange={(e) => setConfig((c) => ({
++                            ...c,
++                            stopAfterMaxPerRun: e.target.checked ? 1 : 0,
++                          }))}
++                          className="h-4 w-4 accent-blue-600"
++                        />
++                        <span>{config.stopAfterMaxPerRun !== 0 ? '停止任务' : '休息后继续'}</span>
++                      </label>
++                      <p className="text-xs text-muted-foreground">关闭后按短间歇自动继续</p>
++                    </div>
++                    <div className="space-y-2">
++                      <Label htmlFor="job51-max-rest-min">继续前最短休息（秒）</Label>
++                      <Input
++                        id="job51-max-rest-min"
++                        type="number"
++                        min={MIN_MAX_PER_RUN_REST_SECONDS}
++                        max={MAX_MAX_PER_RUN_REST_SECONDS}
++                        value={config.maxPerRunRestMinSeconds ?? DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS}
++                        disabled={config.enableAi !== 1 || config.stopAfterMaxPerRun !== 0 || config.maxPerRun === 0}
++                        onChange={(e) => setConfig((c) => ({ ...c, maxPerRunRestMinSeconds: Number(e.target.value) }))}
++                      />
++                    </div>
++                    <div className="space-y-2">
++                      <Label htmlFor="job51-max-rest-max">继续前最长休息（秒）</Label>
++                      <Input
++                        id="job51-max-rest-max"
++                        type="number"
++                        min={MIN_MAX_PER_RUN_REST_SECONDS}
++                        max={MAX_MAX_PER_RUN_REST_SECONDS}
++                        value={config.maxPerRunRestMaxSeconds ?? DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS}
++                        disabled={config.enableAi !== 1 || config.stopAfterMaxPerRun !== 0 || config.maxPerRun === 0}
++                        onChange={(e) => setConfig((c) => ({ ...c, maxPerRunRestMaxSeconds: Number(e.target.value) }))}
++                      />
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index 559ca35..53d4802 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -30,0 +31,3 @@ interface LiepinConfig {
++  stopAfterMaxPerRun?: number
++  maxPerRunRestMinSeconds?: number
++  maxPerRunRestMaxSeconds?: number
+@@ -73 +76,6 @@ interface TaskStatusMessage {
+-type TaskState = 'IDLE' | 'WAITING' | 'RUNNING' | 'STOPPING' | 'PAUSED' | 'COMPLETED' | 'FAILED'
++type TaskState = 'IDLE' | 'WAITING' | 'RUNNING' | 'RESTING' | 'STOPPING' | 'CANCELLED' | 'PAUSED' | 'COMPLETED' | 'FAILED'
++
++type ResumeCursor = {
++  keyword?: string | null
++  page?: number
++}
+@@ -191,0 +200,34 @@ const EMPTY_BATCH_RETRY: BatchRetryStatus = {
++const MIN_MAX_PER_RUN_REST_SECONDS = 30
++const MAX_MAX_PER_RUN_REST_SECONDS = 300
++const DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS = 30
++const DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS = 60
++
++const normalizeMaxPerRun = (value: number | undefined, fallback = 10): number => {
++  const parsed = Number(value)
++  return Math.max(0, Number.isFinite(parsed) ? parsed : fallback)
++}
++
++const normalizeMaxPerRunRestConfig = (value: LiepinConfig) => {
++  const minValue = Number(value.maxPerRunRestMinSeconds)
++  const min = Math.min(
++    MAX_MAX_PER_RUN_REST_SECONDS,
++    Math.max(
++      MIN_MAX_PER_RUN_REST_SECONDS,
++      Number.isFinite(minValue) ? minValue : DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS,
++    ),
++  )
++  const maxValue = Number(value.maxPerRunRestMaxSeconds)
++  const max = Math.min(
++    MAX_MAX_PER_RUN_REST_SECONDS,
++    Math.max(
++      min,
++      Number.isFinite(maxValue) ? maxValue : DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS,
++    ),
++  )
++  return {
++    stopAfterMaxPerRun: value.stopAfterMaxPerRun === 0 ? 0 : 1,
++    maxPerRunRestMinSeconds: min,
++    maxPerRunRestMaxSeconds: max,
++  }
++}
++
+@@ -224,0 +267,3 @@ export default function LiepinPage() {
++    stopAfterMaxPerRun: 1,
++    maxPerRunRestMinSeconds: DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS,
++    maxPerRunRestMaxSeconds: DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS,
+@@ -246,0 +292,5 @@ export default function LiepinPage() {
++  const [restReason, setRestReason] = useState<string | null>(null)
++  const [restUntil, setRestUntil] = useState(0)
++  const [restAttempt, setRestAttempt] = useState(0)
++  const [resumeCursor, setResumeCursor] = useState<ResumeCursor | null>(null)
++  const [restNow, setRestNow] = useState(() => Date.now())
+@@ -406 +456,2 @@ export default function LiepinPage() {
+-        normalized.maxPerRun = Math.min(data.config.maxPerRun ?? 10, 10)
++        normalized.maxPerRun = normalizeMaxPerRun(data.config.maxPerRun)
++        Object.assign(normalized, normalizeMaxPerRunRestConfig(normalized))
+@@ -505,0 +557,6 @@ export default function LiepinPage() {
++      setRestReason(typeof normalTask.restReason === 'string' ? normalTask.restReason : null)
++      setRestUntil(typeof normalTask.restUntil === 'number' ? normalTask.restUntil : 0)
++      setRestAttempt(typeof normalTask.restAttempt === 'number' ? normalTask.restAttempt : 0)
++      const cursor = normalTask.resumeCursor
++      setResumeCursor(cursor && typeof cursor === 'object' ? cursor as ResumeCursor : null)
++      setRestNow(Date.now())
+@@ -593,0 +651,7 @@ export default function LiepinPage() {
++  useEffect(() => {
++    if (taskState !== 'RESTING') return
++    setRestNow(Date.now())
++    const timer = window.setInterval(() => setRestNow(Date.now()), 1000)
++    return () => window.clearInterval(timer)
++  }, [taskState])
++
+@@ -596 +660,6 @@ export default function LiepinPage() {
+-      const payload = { ...config, keywords: keywordLinesForStorage(config.keywords) }
++      const payload = {
++        ...config,
++        keywords: keywordLinesForStorage(config.keywords),
++        maxPerRun: normalizeMaxPerRun(config.maxPerRun),
++        ...normalizeMaxPerRunRestConfig(config),
++      }
+@@ -783,0 +853,14 @@ export default function LiepinPage() {
++  const restReasonLabel = (reason: string | null): string => {
++    switch (reason) {
++      case 'max_per_run': return '已达到本轮成功投递上限'
++      default: return reason ? `触发原因：${reason}` : '任务正在智能休息'
++    }
++  }
++
++  const restRemainingSeconds = Math.max(0, Math.ceil((restUntil - restNow) / 1000))
++  const restCountdown = restRemainingSeconds >= 3600
++    ? `${Math.floor(restRemainingSeconds / 3600)}小时${Math.floor((restRemainingSeconds % 3600) / 60)}分钟`
++    : restRemainingSeconds >= 60
++      ? `${Math.floor(restRemainingSeconds / 60)}分${restRemainingSeconds % 60}秒`
++      : `${restRemainingSeconds}秒`
++
+@@ -870,0 +954,17 @@ export default function LiepinPage() {
++      {taskState === 'RESTING' && (
++        <div role="status" aria-live="polite" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-amber-950">
++          <div className="flex flex-wrap items-center justify-between gap-2">
++            <span className="font-semibold">短间歇休息中 · {restReasonLabel(restReason)}</span>
++            <span className="font-mono text-lg font-semibold tabular-nums">{restCountdown}</span>
++          </div>
++          <div className="mt-1 text-sm">
++            第 {restAttempt || 1} 次休息，预计 {restUntil ? new Date(restUntil).toLocaleTimeString('zh-CN', { hour12: false }) : '--:--:--'} 恢复；任务会自动继续，当前只保留停止操作。
++          </div>
++          {resumeCursor && (
++            <div className="mt-1 text-xs text-amber-800">
++              恢复位置：关键词 {resumeCursor.keyword || '当前关键词'}，第 {resumeCursor.page || 1} 页
++            </div>
++          )}
++        </div>
++      )}
++
+@@ -1324,2 +1424 @@ export default function LiepinPage() {
+-                  min={1}
+-                  max={10}
++                  min={0}
+@@ -1328,0 +1428,43 @@ export default function LiepinPage() {
++                <p className="text-xs text-muted-foreground">0 表示不设置最大值。</p>
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="stopAfterMaxPerRun">达到上限后</Label>
++                <label className="flex h-10 items-center gap-3 rounded-md border px-3 text-sm">
++                  <input
++                    id="stopAfterMaxPerRun"
++                    type="checkbox"
++                    checked={config.stopAfterMaxPerRun !== 0}
++                    disabled={config.maxPerRun === 0}
++                    onChange={(e) => setConfig({
++                      ...config,
++                      stopAfterMaxPerRun: e.target.checked ? 1 : 0,
++                    })}
++                    className="h-4 w-4 accent-blue-600"
++                  />
++                  <span>{config.stopAfterMaxPerRun !== 0 ? '停止任务' : '休息后继续'}</span>
++                </label>
++                <p className="text-xs text-muted-foreground">关闭后按短间歇自动继续。</p>
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="maxPerRunRestMinSeconds">继续前最短休息（秒）</Label>
++                <Input
++                  id="maxPerRunRestMinSeconds"
++                  type="number"
++                  min={MIN_MAX_PER_RUN_REST_SECONDS}
++                  max={MAX_MAX_PER_RUN_REST_SECONDS}
++                  disabled={config.stopAfterMaxPerRun !== 0 || config.maxPerRun === 0}
++                  value={config.maxPerRunRestMinSeconds ?? DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS}
++                  onChange={(e) => setConfig({ ...config, maxPerRunRestMinSeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="maxPerRunRestMaxSeconds">继续前最长休息（秒）</Label>
++                <Input
++                  id="maxPerRunRestMaxSeconds"
++                  type="number"
++                  min={MIN_MAX_PER_RUN_REST_SECONDS}
++                  max={MAX_MAX_PER_RUN_REST_SECONDS}
++                  disabled={config.stopAfterMaxPerRun !== 0 || config.maxPerRun === 0}
++                  value={config.maxPerRunRestMaxSeconds ?? DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS}
++                  onChange={(e) => setConfig({ ...config, maxPerRunRestMaxSeconds: Number(e.target.value) })}
++                />
+diff --git a/src/main/java/com/getjobs/application/entity/Job51ConfigEntity.java b/src/main/java/com/getjobs/application/entity/Job51ConfigEntity.java
+index 99a9435..363d4f8 100644
+--- a/src/main/java/com/getjobs/application/entity/Job51ConfigEntity.java
++++ b/src/main/java/com/getjobs/application/entity/Job51ConfigEntity.java
+@@ -31 +31 @@ public class Job51ConfigEntity {
+-    /** AI 模式单次最多处理的岗位数 */
++    /** 每轮最多成功投递的岗位数；0 表示不设上限 */
+@@ -34,0 +35,11 @@ public class Job51ConfigEntity {
++    /** 达到每轮成功投递上限后是否停止（1=停止，0=自动继续） */
++    @TableField("stop_after_max_per_run")
++    private Integer stopAfterMaxPerRun;
++
++    /** 达到每轮上限后自动继续前的短休息区间 */
++    @TableField("max_per_run_rest_min_seconds")
++    private Integer maxPerRunRestMinSeconds;
++
++    @TableField("max_per_run_rest_max_seconds")
++    private Integer maxPerRunRestMaxSeconds;
++
+diff --git a/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java b/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+index 8adf7bd..4f7afe9 100644
+--- a/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
++++ b/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+@@ -53 +53 @@ public class LiepinConfigEntity {
+-    /** 单次任务最多处理岗位数 */
++    /** 每轮最多成功投递的岗位数；0 表示不设上限 */
+@@ -55,0 +56,7 @@ public class LiepinConfigEntity {
++    /** 达到每轮成功投递上限后是否停止（1=停止，0=自动继续） */
++    private Integer stopAfterMaxPerRun;
++
++    /** 达到每轮上限后自动继续前的短休息区间 */
++    private Integer maxPerRunRestMinSeconds;
++    private Integer maxPerRunRestMaxSeconds;
++
+diff --git a/src/main/java/com/getjobs/application/service/ConfigService.java b/src/main/java/com/getjobs/application/service/ConfigService.java
+index 2701935..da3b129 100644
+--- a/src/main/java/com/getjobs/application/service/ConfigService.java
++++ b/src/main/java/com/getjobs/application/service/ConfigService.java
+@@ -238,0 +239,6 @@ public class ConfigService {
++        config.setStopAfterMaxPerRun(entity == null || entity.getStopAfterMaxPerRun() == null
++                || entity.getStopAfterMaxPerRun() != 0);
++        config.setMaxPerRunRestMinSeconds(entity == null || entity.getMaxPerRunRestMinSeconds() == null
++                ? LiepinConfig.DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS : entity.getMaxPerRunRestMinSeconds());
++        config.setMaxPerRunRestMaxSeconds(entity == null || entity.getMaxPerRunRestMaxSeconds() == null
++                ? LiepinConfig.DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS : entity.getMaxPerRunRestMaxSeconds());
+diff --git a/src/main/java/com/getjobs/application/service/Job51Service.java b/src/main/java/com/getjobs/application/service/Job51Service.java
+index 64cdb86..fab4994 100644
+--- a/src/main/java/com/getjobs/application/service/Job51Service.java
++++ b/src/main/java/com/getjobs/application/service/Job51Service.java
+@@ -90,0 +91,6 @@ public class Job51Service {
++        config.setStopAfterMaxPerRun(entity.getStopAfterMaxPerRun() == null
++                || entity.getStopAfterMaxPerRun() != 0);
++        config.setMaxPerRunRestMinSeconds(entity.getMaxPerRunRestMinSeconds() == null
++                ? Job51Config.DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS : entity.getMaxPerRunRestMinSeconds());
++        config.setMaxPerRunRestMaxSeconds(entity.getMaxPerRunRestMaxSeconds() == null
++                ? Job51Config.DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS : entity.getMaxPerRunRestMaxSeconds());
+@@ -159,0 +166,3 @@ public class Job51Service {
++            try { stmt.execute("ALTER TABLE job51_config ADD COLUMN stop_after_max_per_run INTEGER NOT NULL DEFAULT 1"); } catch (Exception ignored) {}
++            try { stmt.execute("ALTER TABLE job51_config ADD COLUMN max_per_run_rest_min_seconds INTEGER NOT NULL DEFAULT 30"); } catch (Exception ignored) {}
++            try { stmt.execute("ALTER TABLE job51_config ADD COLUMN max_per_run_rest_max_seconds INTEGER NOT NULL DEFAULT 60"); } catch (Exception ignored) {}
+@@ -213,0 +223 @@ public class Job51Service {
++        validateMaxPerRunConfig(config);
+@@ -226,0 +237 @@ public class Job51Service {
++        validateMaxPerRunConfig(incoming);
+@@ -235,0 +247,5 @@ public class Job51Service {
++            toInsert.setStopAfterMaxPerRun(incoming.getStopAfterMaxPerRun() == null ? 1 : incoming.getStopAfterMaxPerRun());
++            toInsert.setMaxPerRunRestMinSeconds(incoming.getMaxPerRunRestMinSeconds() == null
++                    ? Job51Config.DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS : incoming.getMaxPerRunRestMinSeconds());
++            toInsert.setMaxPerRunRestMaxSeconds(incoming.getMaxPerRunRestMaxSeconds() == null
++                    ? Job51Config.DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS : incoming.getMaxPerRunRestMaxSeconds());
+@@ -258,0 +275,3 @@ public class Job51Service {
++            if (incoming.getStopAfterMaxPerRun() != null) toUpdate.setStopAfterMaxPerRun(incoming.getStopAfterMaxPerRun());
++            if (incoming.getMaxPerRunRestMinSeconds() != null) toUpdate.setMaxPerRunRestMinSeconds(incoming.getMaxPerRunRestMinSeconds());
++            if (incoming.getMaxPerRunRestMaxSeconds() != null) toUpdate.setMaxPerRunRestMaxSeconds(incoming.getMaxPerRunRestMaxSeconds());
+@@ -275,0 +295,15 @@ public class Job51Service {
++    private void validateMaxPerRunConfig(Job51ConfigEntity config) {
++        if (config == null) return;
++        if (config.getMaxPerRun() != null && config.getMaxPerRun() < 0) {
++            throw new IllegalArgumentException("51job每轮成功投递上限必须为0或正整数");
++        }
++        int min = config.getMaxPerRunRestMinSeconds() == null
++                ? Job51Config.DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS : config.getMaxPerRunRestMinSeconds();
++        int max = config.getMaxPerRunRestMaxSeconds() == null
++                ? Job51Config.DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS : config.getMaxPerRunRestMaxSeconds();
++        if (min < Job51Config.MIN_MAX_PER_RUN_REST_SECONDS
++                || max < min || max > Job51Config.MAX_MAX_PER_RUN_REST_SECONDS) {
++            throw new IllegalArgumentException("51job上限后的短休息需满足30<=最小秒数<=最大秒数<=300");
++        }
++    }
++
+diff --git a/src/main/java/com/getjobs/application/service/LiepinService.java b/src/main/java/com/getjobs/application/service/LiepinService.java
+index 9aadb81..489d929 100644
+--- a/src/main/java/com/getjobs/application/service/LiepinService.java
++++ b/src/main/java/com/getjobs/application/service/LiepinService.java
+@@ -115,0 +116,9 @@ public class LiepinService {
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN stop_after_max_per_run INTEGER DEFAULT 1");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_per_run_rest_min_seconds INTEGER DEFAULT 30");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_per_run_rest_max_seconds INTEGER DEFAULT 60");
++            } catch (Exception ignored) {}
+@@ -897,0 +907,9 @@ public class LiepinService {
++        if (config.getStopAfterMaxPerRun() != null) {
++            existing.setStopAfterMaxPerRun(config.getStopAfterMaxPerRun());
++        }
++        if (config.getMaxPerRunRestMinSeconds() != null) {
++            existing.setMaxPerRunRestMinSeconds(config.getMaxPerRunRestMinSeconds());
++        }
++        if (config.getMaxPerRunRestMaxSeconds() != null) {
++            existing.setMaxPerRunRestMaxSeconds(config.getMaxPerRunRestMaxSeconds());
++        }
+@@ -965,0 +984,7 @@ public class LiepinService {
++        if (config.getStopAfterMaxPerRun() == null) config.setStopAfterMaxPerRun(1);
++        if (config.getMaxPerRunRestMinSeconds() == null) {
++            config.setMaxPerRunRestMinSeconds(LiepinConfig.DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS);
++        }
++        if (config.getMaxPerRunRestMaxSeconds() == null) {
++            config.setMaxPerRunRestMaxSeconds(LiepinConfig.DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS);
++        }
+@@ -977,2 +1002,7 @@ public class LiepinService {
+-        if (config.getMaxPerRun() < 1) {
+-            throw new IllegalArgumentException("猎聘单次岗位上限必须大于0");
++        if (config.getMaxPerRun() < 0) {
++            throw new IllegalArgumentException("猎聘每轮成功投递上限必须为0或正整数");
++        }
++        if (config.getMaxPerRunRestMinSeconds() < LiepinConfig.MIN_MAX_PER_RUN_REST_SECONDS
++                || config.getMaxPerRunRestMaxSeconds() < config.getMaxPerRunRestMinSeconds()
++                || config.getMaxPerRunRestMaxSeconds() > LiepinConfig.MAX_MAX_PER_RUN_REST_SECONDS) {
++            throw new IllegalArgumentException("猎聘上限后的短休息需满足30<=最小秒数<=最大秒数<=300");
+@@ -980 +1009,0 @@ public class LiepinService {
+-        config.setMaxPerRun(Math.min(config.getMaxPerRun(), LiepinConfig.MAX_SAFE_PER_RUN));
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51.java b/src/main/java/com/getjobs/worker/job51/Job51.java
+index 571d3c0..7dd784f 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51.java
+@@ -220,0 +221,4 @@ public class Job51 {
++                    if (hasReachedMaxPerRun()) {
++                        handleMaxPerRunReached();
++                        break;
++                    }
+@@ -263 +267 @@ public class Job51 {
+-            if (shouldStop() || aiProcessedCount >= maxPerRun || detailAccessBlocked) break;
++            if (shouldStop() || hasReachedMaxPerRun() || detailAccessBlocked) break;
+@@ -270,2 +274,2 @@ public class Job51 {
+-        } else if (aiProcessedCount >= maxPerRun) {
+-            sendProgress(String.format("已达到本次 AI 岗位处理上限%d个", maxPerRun), null, null);
++        } else if (hasReachedMaxPerRun()) {
++            handleMaxPerRunReached();
+@@ -326 +330,2 @@ public class Job51 {
+-        if (config == null || !config.isRestEnabled() || restRequest != null) {
++        if (config == null || restRequest != null
++                || (!config.isRestEnabled() && !"max_per_run".equals(reason))) {
+@@ -338,0 +344,20 @@ public class Job51 {
++    private boolean hasReachedMaxPerRun() {
++        if (config == null || config.effectiveMaxPerRun() == 0) return false;
++        return resultList.size() >= config.effectiveMaxPerRun();
++    }
++
++    private int remainingMaxPerRun() {
++        int max = config == null ? 0 : config.effectiveMaxPerRun();
++        return max == 0 ? Integer.MAX_VALUE : Math.max(0, max - resultList.size());
++    }
++
++    private void handleMaxPerRunReached() {
++        if (!hasReachedMaxPerRun()) return;
++        int max = config.effectiveMaxPerRun();
++        if (config.isStopAfterMaxPerRun()) {
++            sendProgress(String.format("已达到本轮成功投递上限%d个，按配置停止", max), null, null);
++            return;
++        }
++        requestRest("max_per_run", String.format("已达到本轮成功投递上限%d个，进入短间歇休息", max));
++    }
++
+@@ -453,0 +479,4 @@ public class Job51 {
++                if (hasReachedMaxPerRun()) {
++                    handleMaxPerRunReached();
++                    return;
++                }
+@@ -600 +629 @@ public class Job51 {
+-            if (shouldStop() || aiProcessedCount >= maxPerRun) return;
++            if (shouldStop() || hasReachedMaxPerRun()) return;
+@@ -655 +684 @@ public class Job51 {
+-        for (int i = 0; i < cardCount && aiProcessedCount < maxPerRun; i++) {
++        for (int i = 0; i < cardCount && !hasReachedMaxPerRun(); i++) {
+@@ -724 +753 @@ public class Job51 {
+-            if (aiProcessedCount < maxPerRun && i + 1 < cardCount) {
++            if (!hasReachedMaxPerRun() && i + 1 < cardCount) {
+@@ -1876,0 +1906,3 @@ public class Job51 {
++            if (hasReachedMaxPerRun() || selectedJobInfos.size() >= remainingMaxPerRun()) {
++                break;
++            }
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51Config.java b/src/main/java/com/getjobs/worker/job51/Job51Config.java
+index 7c3b801..f186285 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51Config.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51Config.java
+@@ -18 +17,0 @@ public class Job51Config {
+-    public static final int MAX_AI_PER_RUN = 10;
+@@ -19,0 +19,4 @@ public class Job51Config {
++    public static final int DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS = 30;
++    public static final int DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS = 60;
++    public static final int MIN_MAX_PER_RUN_REST_SECONDS = 30;
++    public static final int MAX_MAX_PER_RUN_REST_SECONDS = 300;
+@@ -55 +58 @@ public class Job51Config {
+-    /** AI 模式单次最多处理的岗位数 */
++    /** 每轮最多成功投递的岗位数；0 表示不设上限 */
+@@ -57,0 +61,7 @@ public class Job51Config {
++    /** 达到每轮成功投递上限后是否停止 */
++    private Boolean stopAfterMaxPerRun = true;
++
++    /** 达到每轮上限后自动继续前的短休息区间 */
++    private Integer maxPerRunRestMinSeconds = DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS;
++    private Integer maxPerRunRestMaxSeconds = DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS;
++
+@@ -88 +98,19 @@ public class Job51Config {
+-        return Math.max(1, Math.min(value, MAX_AI_PER_RUN));
++        return Math.max(0, value);
++    }
++
++    public boolean isStopAfterMaxPerRun() {
++        return !Boolean.FALSE.equals(stopAfterMaxPerRun);
++    }
++
++    public int effectiveMaxPerRunRestMinSeconds() {
++        int value = maxPerRunRestMinSeconds == null
++                ? DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS : maxPerRunRestMinSeconds;
++        return Math.max(MIN_MAX_PER_RUN_REST_SECONDS,
++                Math.min(MAX_MAX_PER_RUN_REST_SECONDS, value));
++    }
++
++    public int effectiveMaxPerRunRestMaxSeconds() {
++        int value = maxPerRunRestMaxSeconds == null
++                ? DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS : maxPerRunRestMaxSeconds;
++        return Math.max(effectiveMaxPerRunRestMinSeconds(),
++                Math.min(MAX_MAX_PER_RUN_REST_SECONDS, value));
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index 503c1f4..1a79cfd 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -83,0 +84,4 @@ public class Liepin {
++    private String currentKeyword = "";
++    private int currentPage;
++    private String resumeKeyword;
++    private int resumePage = 1;
+@@ -167 +171,2 @@ public class Liepin {
+-        RETRY_REQUIRED
++        RETRY_REQUIRED,
++        REST_REQUIRED
+@@ -170 +175,8 @@ public class Liepin {
+-    public record ExecutionResult(int deliveredCount, ExecutionOutcome outcome, String detail) {
++    public record RestRequest(String reason, String message, String keyword, int page) {
++    }
++
++    public record ExecutionResult(int deliveredCount, ExecutionOutcome outcome,
++                                  String detail, RestRequest restRequest) {
++        public ExecutionResult(int deliveredCount, ExecutionOutcome outcome, String detail) {
++            this(deliveredCount, outcome, detail, null);
++        }
+@@ -325,0 +338,2 @@ public class Liepin {
++        currentKeyword = firstNonBlank(resumeKeyword);
++        currentPage = Math.max(0, resumePage);
+@@ -362,0 +377,11 @@ public class Liepin {
++    /** 清除本轮休息信号，并从触发休息的关键词和页面继续。 */
++    public void prepareForResume(RestRequest request) {
++        if (request == null) {
++            return;
++        }
++        resumeKeyword = firstNonBlank(request.keyword());
++        resumePage = Math.max(1, request.page());
++        currentKeyword = resumeKeyword;
++        currentPage = resumePage;
++    }
++
+@@ -402 +427,12 @@ public class Liepin {
+-        for (String keyword : keywords) {
++        String requestedResumeKeyword = resumeKeyword;
++        int keywordStart = 0;
++        if (!isPendingRetryMode() && requestedResumeKeyword != null && !requestedResumeKeyword.isBlank()) {
++            for (int i = 0; i < keywords.size(); i++) {
++                if (requestedResumeKeyword.equals(firstNonBlank(keywords.get(i)))) {
++                    keywordStart = i;
++                    break;
++                }
++            }
++        }
++        for (int keywordIndex = keywordStart; keywordIndex < keywords.size(); keywordIndex++) {
++            String keyword = keywords.get(keywordIndex);
+@@ -457,3 +493,10 @@ public class Liepin {
+-            if (resultList.size() >= config.effectiveMaxPerRun()) {
+-                info(String.format("已达到本次成功聊天上限%d个，结束全部关键词", config.effectiveMaxPerRun()));
+-                break;
++            if (hasReachedMaxPerRun()) {
++                if (config.isStopAfterMaxPerRun()) {
++                    info(String.format("已达到本次成功聊天上限%d个，按配置停止", config.effectiveMaxPerRun()));
++                    break;
++                }
++                return new ExecutionResult(resultList.size(), ExecutionOutcome.REST_REQUIRED,
++                        String.format("已达到本次成功聊天上限%d个，进入短间歇休息", config.effectiveMaxPerRun()),
++                        new RestRequest("max_per_run",
++                                String.format("已达到本次成功聊天上限%d个，进入短间歇休息", config.effectiveMaxPerRun()),
++                                currentKeyword, Math.max(1, currentPage)));
+@@ -470,0 +514,2 @@ public class Liepin {
++        resumeKeyword = null;
++        resumePage = 1;
+@@ -525,0 +571,3 @@ public class Liepin {
++        if (result == PageScanResult.LIMIT_REACHED) {
++            return maxPerRunResult();
++        }
+@@ -1032,2 +1080,7 @@ public class Liepin {
+-        if (maxPerRun < 1) {
+-            throw new IllegalArgumentException("猎聘单次岗位上限必须大于0");
++        if (maxPerRun < 0) {
++            throw new IllegalArgumentException("猎聘单次岗位上限必须为0或正整数");
++        }
++        if (config.effectiveMaxPerRunRestMinSeconds() < LiepinConfig.MIN_MAX_PER_RUN_REST_SECONDS
++                || config.effectiveMaxPerRunRestMaxSeconds() < config.effectiveMaxPerRunRestMinSeconds()
++                || config.effectiveMaxPerRunRestMaxSeconds() > LiepinConfig.MAX_MAX_PER_RUN_REST_SECONDS) {
++            throw new IllegalArgumentException("猎聘上限后的短休息需满足30<=最小秒数<=最大秒数<=300");
+@@ -1077,0 +1131 @@ public class Liepin {
++        currentKeyword = cleanKeyword;
+@@ -1079,0 +1134,2 @@ public class Liepin {
++                : resumeKeyword != null && resumeKeyword.equals(cleanKeyword)
++                ? Math.max(1, resumePage)
+@@ -1139,0 +1196,2 @@ public class Liepin {
++            currentKeyword = cleanKeyword;
++            currentPage = i + 1;
+@@ -1877 +1935 @@ public class Liepin {
+-            if (resultList.size() >= config.effectiveMaxPerRun()) {
++            if (hasReachedMaxPerRun()) {
+@@ -2222,3 +2280,2 @@ public class Liepin {
+-                        if (!rateGuard.afterSuccessfulSend(
+-                                resultList.size() < config.effectiveMaxPerRun())) return PageScanResult.STOPPED;
+-                        if (resultList.size() >= config.effectiveMaxPerRun()) {
++                        if (!rateGuard.afterSuccessfulSend(!hasReachedMaxPerRun())) return PageScanResult.STOPPED;
++                        if (hasReachedMaxPerRun()) {
+@@ -2651,3 +2708,2 @@ public class Liepin {
+-            if (!rateGuard.afterSuccessfulSend(
+-                    resultList.size() < config.effectiveMaxPerRun())) return PageScanResult.STOPPED;
+-            return resultList.size() >= config.effectiveMaxPerRun()
++            if (!rateGuard.afterSuccessfulSend(!hasReachedMaxPerRun())) return PageScanResult.STOPPED;
++            return hasReachedMaxPerRun()
+@@ -2773,3 +2829,2 @@ public class Liepin {
+-            if (!rateGuard.afterSuccessfulSend(
+-                    resultList.size() < config.effectiveMaxPerRun())) return PageScanResult.STOPPED;
+-            if (resultList.size() >= config.effectiveMaxPerRun()) {
++            if (!rateGuard.afterSuccessfulSend(!hasReachedMaxPerRun())) return PageScanResult.STOPPED;
++            if (hasReachedMaxPerRun()) {
+@@ -3245,0 +3301,19 @@ public class Liepin {
++    private boolean hasReachedMaxPerRun() {
++        int max = config == null ? 0 : config.effectiveMaxPerRun();
++        return max > 0 && resultList.size() >= max;
++    }
++
++    private ExecutionResult maxPerRunResult() {
++        if (config == null || !hasReachedMaxPerRun()) {
++            return new ExecutionResult(resultList.size(), ExecutionOutcome.COMPLETED, completionDetail());
++        }
++        if (config.isStopAfterMaxPerRun()) {
++            info(String.format("已达到本次成功聊天上限%d个，按配置停止", config.effectiveMaxPerRun()));
++            return new ExecutionResult(resultList.size(), ExecutionOutcome.COMPLETED,
++                    String.format("已达到本次成功聊天上限%d个，按配置停止", config.effectiveMaxPerRun()));
++        }
++        String message = String.format("已达到本次成功聊天上限%d个，进入短间歇休息", config.effectiveMaxPerRun());
++        return new ExecutionResult(resultList.size(), ExecutionOutcome.REST_REQUIRED, message,
++                new RestRequest("max_per_run", message, currentKeyword, Math.max(1, currentPage)));
++    }
++
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+index c6ee1b2..7ca8a0a 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+@@ -13 +12,0 @@ public class LiepinConfig {
+-    public static final int MAX_SAFE_PER_RUN = 10;
+@@ -14,0 +14,4 @@ public class LiepinConfig {
++    public static final int DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS = 30;
++    public static final int DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS = 60;
++    public static final int MIN_MAX_PER_RUN_REST_SECONDS = 30;
++    public static final int MAX_MAX_PER_RUN_REST_SECONDS = 300;
+@@ -90 +93 @@ public class LiepinConfig {
+-    /** 单次任务最多处理的合格岗位数 */
++    /** 每轮最多成功投递的合格岗位数；0 表示不设上限 */
+@@ -92,0 +96,7 @@ public class LiepinConfig {
++    /** 达到每轮成功投递上限后是否停止 */
++    private Boolean stopAfterMaxPerRun = true;
++
++    /** 达到每轮上限后自动继续前的短休息区间 */
++    private Integer maxPerRunRestMinSeconds = DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS;
++    private Integer maxPerRunRestMaxSeconds = DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS;
++
+@@ -184,2 +194,19 @@ public class LiepinConfig {
+-        return Math.min(maxPerRun == null ? DEFAULT_MAX_PER_RUN : maxPerRun,
+-                MAX_SAFE_PER_RUN);
++        return Math.max(0, maxPerRun == null ? DEFAULT_MAX_PER_RUN : maxPerRun);
++    }
++
++    public boolean isStopAfterMaxPerRun() {
++        return !Boolean.FALSE.equals(stopAfterMaxPerRun);
++    }
++
++    public int effectiveMaxPerRunRestMinSeconds() {
++        int value = maxPerRunRestMinSeconds == null
++                ? DEFAULT_MAX_PER_RUN_REST_MIN_SECONDS : maxPerRunRestMinSeconds;
++        return Math.max(MIN_MAX_PER_RUN_REST_SECONDS,
++                Math.min(MAX_MAX_PER_RUN_REST_SECONDS, value));
++    }
++
++    public int effectiveMaxPerRunRestMaxSeconds() {
++        int value = maxPerRunRestMaxSeconds == null
++                ? DEFAULT_MAX_PER_RUN_REST_MAX_SECONDS : maxPerRunRestMaxSeconds;
++        return Math.max(effectiveMaxPerRunRestMinSeconds(),
++                Math.min(MAX_MAX_PER_RUN_REST_SECONDS, value));
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java b/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
+index f38b404..8148a1c 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
+@@ -13,2 +12,0 @@ final class LiepinRateGuard {
+-    static final int MAX_SAFE_PER_RUN = LiepinConfig.MAX_SAFE_PER_RUN;
+-
+diff --git a/src/main/java/com/getjobs/worker/service/Job51JobService.java b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+index 2d9ca74..782ea30 100644
+--- a/src/main/java/com/getjobs/worker/service/Job51JobService.java
++++ b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+@@ -489,0 +490,6 @@ public class Job51JobService implements JobPlatformService {
++        if ("max_per_run".equals(request.reason())) {
++            return ThreadLocalRandom.current().nextLong(
++                    config.effectiveMaxPerRunRestMinSeconds(),
++                    (long) config.effectiveMaxPerRunRestMaxSeconds() + 1L
++            ) * 1000L;
++        }
+diff --git a/src/main/java/com/getjobs/worker/service/LiepinJobService.java b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+index 25f370e..3f07060 100644
+--- a/src/main/java/com/getjobs/worker/service/LiepinJobService.java
++++ b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+@@ -28,0 +29 @@ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.Executors;
+@@ -29,0 +31,3 @@ import java.util.concurrent.ForkJoinPool;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
++import java.util.concurrent.ThreadLocalRandom;
+@@ -32,0 +37 @@ import java.util.concurrent.atomic.AtomicBoolean;
++import java.util.concurrent.atomic.AtomicReference;
+@@ -47,0 +53,8 @@ public class LiepinJobService implements JobPlatformService {
++    private static ScheduledExecutorService createFallbackScheduler() {
++        return Executors.newSingleThreadScheduledExecutor(runnable -> {
++            Thread thread = new Thread(runnable, "Liepin-Resume-Fallback");
++            thread.setDaemon(true);
++            return thread;
++        });
++    }
++
+@@ -51,0 +65 @@ public class LiepinJobService implements JobPlatformService {
++        RESTING,
+@@ -52,0 +67 @@ public class LiepinJobService implements JobPlatformService {
++        CANCELLED,
+@@ -79,0 +95,4 @@ public class LiepinJobService implements JobPlatformService {
++    @Autowired(required = false)
++    @Qualifier("deliveryResumeScheduler")
++    private ScheduledExecutorService deliveryResumeScheduler = createFallbackScheduler();
++
+@@ -111,0 +131,6 @@ public class LiepinJobService implements JobPlatformService {
++    private volatile Liepin activeLiepin;
++    private volatile Liepin.RestRequest restRequest;
++    private volatile String restReason;
++    private volatile long restUntil;
++    private volatile int restAttempt;
++    private volatile ScheduledFuture<?> scheduledResume;
+@@ -426,0 +452,6 @@ public class LiepinJobService implements JobPlatformService {
++        activeLiepin = null;
++        restRequest = null;
++        restReason = null;
++        restUntil = 0L;
++        restAttempt = 0;
++        scheduledResume = null;
+@@ -482,0 +514,6 @@ public class LiepinJobService implements JobPlatformService {
++            if (shouldStop()) {
++                taskState = TaskState.CANCELLED;
++                publish(progressCallback, JobProgressMessage.warning(PLATFORM, "投递任务已取消"));
++                finishRun();
++                return;
++            }
+@@ -483,0 +521 @@ public class LiepinJobService implements JobPlatformService {
++            AtomicReference<Liepin.ExecutionResult> resultRef = new AtomicReference<>();
+@@ -486 +524 @@ public class LiepinJobService implements JobPlatformService {
+-                    () -> executeDeliveryInternal(progressCallback)
++                    () -> resultRef.set(executeDeliveryInternal(progressCallback))
+@@ -489,2 +527,3 @@ public class LiepinJobService implements JobPlatformService {
+-                taskState = TaskState.PAUSED;
+-                publish(progressCallback, buildPausedMessage(lastDeliveredCount));
++                taskState = TaskState.CANCELLED;
++                publish(progressCallback, JobProgressMessage.warning(PLATFORM,
++                        "投递任务已取消，尚未开始投递"));
+@@ -491,0 +531,36 @@ public class LiepinJobService implements JobPlatformService {
++                return;
++            }
++
++            Liepin.ExecutionResult result = resultRef.get();
++            if (result == null) {
++                finishRun();
++                return;
++            }
++            lastDeliveredCount = result.deliveredCount();
++            switch (result.outcome()) {
++                case USER_PAUSED -> {
++                    taskState = shouldStop() ? TaskState.CANCELLED : TaskState.PAUSED;
++                    publish(progressCallback, shouldStop()
++                            ? JobProgressMessage.warning(PLATFORM,
++                            String.format("投递已停止，已发起%d个聊天", result.deliveredCount()))
++                            : buildPausedMessage(result.deliveredCount()));
++                }
++                case RATE_LIMITED -> {
++                    taskState = TaskState.PAUSED;
++                    publish(progressCallback, buildRateLimitedMessage(
++                            result.deliveredCount(), result.detail()));
++                }
++                case RETRY_REQUIRED -> {
++                    taskState = TaskState.PAUSED;
++                    publish(progressCallback, buildSearchRetryMessage(
++                            result.deliveredCount(), result.detail()));
++                }
++                case REST_REQUIRED -> {
++                    scheduleRest(result.restRequest(), progressCallback);
++                    return;
++                }
++                case COMPLETED -> {
++                    taskState = TaskState.COMPLETED;
++                    publish(progressCallback, buildCompletionMessage(
++                            result.deliveredCount(), deliverySummary));
++                }
+@@ -492,0 +568,9 @@ public class LiepinJobService implements JobPlatformService {
++            finishRun();
++        } catch (Liepin.PageLifecycleException e) {
++            log.error("猎聘投递任务因页面生命周期中断", e);
++            taskState = TaskState.FAILED;
++            String message = e.sideEffectStarted()
++                    ? "浏览器页面在发送过程中失效，发送结果不确定，任务已暂停，请检查后重试"
++                    : "猎聘页面已失效，任务已暂停，请重新启动投递";
++            publish(progressCallback, JobProgressMessage.error(PLATFORM, message));
++            finishRun();
+@@ -654,15 +738,7 @@ public class LiepinJobService implements JobPlatformService {
+-    private void executeDeliveryInternal(Consumer<JobProgressMessage> progressCallback) {
+-        Liepin liepin = null;
+-        try {
+-            Page page = playwrightManager.ensureLiepinPageReady();
+-            if (page == null) {
+-                taskState = TaskState.FAILED;
+-                publish(progressCallback, JobProgressMessage.error(PLATFORM, "猎聘页面未初始化"));
+-                return;
+-            }
+-
+-            if (!playwrightManager.isLoggedIn(PLATFORM)) {
+-                taskState = TaskState.FAILED;
+-                publish(progressCallback, JobProgressMessage.error(PLATFORM, "请先登录猎聘"));
+-                return;
+-            }
++    private Liepin.ExecutionResult executeDeliveryInternal(Consumer<JobProgressMessage> progressCallback) {
++        Page page = playwrightManager.ensureLiepinPageReady();
++        if (page == null) {
++            taskState = TaskState.FAILED;
++            publish(progressCallback, JobProgressMessage.error(PLATFORM, "猎聘页面未初始化"));
++            return null;
++        }
+@@ -670,2 +746,5 @@ public class LiepinJobService implements JobPlatformService {
+-            // 暂停后台登录监控，避免并发访问冲突
+-            playwrightManager.pauseLiepinMonitoring();
++        if (!playwrightManager.isLoggedIn(PLATFORM)) {
++            taskState = TaskState.FAILED;
++            publish(progressCallback, JobProgressMessage.error(PLATFORM, "请先登录猎聘"));
++            return null;
++        }
+@@ -673,3 +752,3 @@ public class LiepinJobService implements JobPlatformService {
+-            // 加载配置（统一通过 ConfigService 从专表读取）
+-            LiepinConfig config = configService.getLiepinConfig();
+-            publish(progressCallback, JobProgressMessage.info(PLATFORM, "配置加载成功"));
++        taskState = TaskState.RUNNING;
++        // 暂停后台登录监控，避免并发访问冲突
++        playwrightManager.pauseLiepinMonitoring();
+@@ -677 +756,4 @@ public class LiepinJobService implements JobPlatformService {
+-            publish(progressCallback, JobProgressMessage.info(PLATFORM, "开始投递任务..."));
++        // 每次恢复都重新读取配置；当前休息倒计时仍使用触发时的快照。
++        LiepinConfig config = configService.getLiepinConfig();
++        publish(progressCallback, JobProgressMessage.info(PLATFORM, "配置加载成功"));
++        publish(progressCallback, JobProgressMessage.info(PLATFORM, "开始投递任务..."));
+@@ -679,8 +761,7 @@ public class LiepinJobService implements JobPlatformService {
+-            // 创建并执行 Bean
+-            Liepin.ProgressCallback cb = (message, current, total) -> {
+-                if (current != null && total != null) {
+-                    publish(progressCallback, JobProgressMessage.progress(PLATFORM, message, current, total));
+-                } else {
+-                    publish(progressCallback, JobProgressMessage.info(PLATFORM, message));
+-                }
+-            };
++        Liepin.ProgressCallback cb = (message, current, total) -> {
++            if (current != null && total != null) {
++                publish(progressCallback, JobProgressMessage.progress(PLATFORM, message, current, total));
++            } else {
++                publish(progressCallback, JobProgressMessage.info(PLATFORM, message));
++            }
++        };
+@@ -687,0 +769,2 @@ public class LiepinJobService implements JobPlatformService {
++        Liepin liepin = activeLiepin;
++        if (liepin == null) {
+@@ -689,9 +772,26 @@ public class LiepinJobService implements JobPlatformService {
+-            liepin.setPage(page);
+-            liepin.setConfig(config);
+-            liepin.setAccountPacing(accountPacing);
+-            liepin.setProgressCallback(cb);
+-            liepin.setShouldStopCallback(this::shouldStop);
+-            liepin.setGreetingConfirmation(this::awaitGreetingConfirmation);
+-            liepin.setPageRecovery(playwrightManager::ensureLiepinPageReady);
+-            Liepin activeLiepin = liepin;
+-            liepin.setStatsChangedCallback(() -> refreshRunStats(activeLiepin));
++            activeLiepin = liepin;
++        } else if (restRequest != null) {
++            liepin.prepareForResume(restRequest);
++            restRequest = null;
++            publish(progressCallback, JobProgressMessage.info(PLATFORM,
++                    "间歇休息结束，恢复当前关键词和页面"));
++        }
++        liepin.setPage(page);
++        liepin.setConfig(config);
++        liepin.setAccountPacing(accountPacing);
++        liepin.setProgressCallback(cb);
++        liepin.setShouldStopCallback(this::shouldStop);
++        liepin.setGreetingConfirmation(this::awaitGreetingConfirmation);
++        liepin.setPageRecovery(playwrightManager::ensureLiepinPageReady);
++        Liepin active = liepin;
++        liepin.setStatsChangedCallback(() -> refreshRunStats(active));
++
++        if (retryMode == RetryMode.AI_BATCH) {
++            executeBatchRetryRounds(progressCallback, liepin, config);
++            return null;
++        }
++        if (retryMode == RetryMode.SUSPENDED_BATCH) {
++            liepin.setPendingRetryJobIds(pendingRetryJobIds);
++            executeSuspendedBatchRetryRounds(progressCallback, liepin);
++            return null;
++        }
+@@ -699,8 +799,11 @@ public class LiepinJobService implements JobPlatformService {
+-            if (retryMode == RetryMode.AI_BATCH) {
+-                executeBatchRetryRounds(progressCallback, liepin, config);
+-                return;
+-            }
+-            if (retryMode == RetryMode.SUSPENDED_BATCH) {
+-                liepin.setPendingRetryJobIds(pendingRetryJobIds);
+-                executeSuspendedBatchRetryRounds(progressCallback, liepin);
+-                return;
++        Liepin.ExecutionResult result = liepin.execute();
++        lastDeliveredCount = result.deliveredCount();
++        refreshRunStats(liepin);
++        return result;
++    }
++
++    private LiepinConfig configForRest() {
++        try {
++            LiepinConfig latest = configService.getLiepinConfig();
++            if (latest != null) {
++                return latest;
+@@ -707,0 +811,5 @@ public class LiepinJobService implements JobPlatformService {
++        } catch (Exception e) {
++            log.debug("读取最新猎聘休息配置失败，使用默认短休息区间: {}", e.getMessage());
++        }
++        return new LiepinConfig();
++    }
+@@ -709,16 +817,36 @@ public class LiepinJobService implements JobPlatformService {
+-            Liepin.ExecutionResult executionResult = liepin.execute();
+-            int deliveredCount = executionResult.deliveredCount();
+-            lastDeliveredCount = deliveredCount;
+-            refreshRunStats(liepin);
+-            switch (executionResult.outcome()) {
+-                case USER_PAUSED -> {
+-                    taskState = TaskState.PAUSED;
+-                    publish(progressCallback, buildPausedMessage(deliveredCount));
+-                }
+-                case RATE_LIMITED -> {
+-                    taskState = TaskState.PAUSED;
+-                    publish(progressCallback, buildRateLimitedMessage(deliveredCount, executionResult.detail()));
+-                }
+-                case RETRY_REQUIRED -> {
+-                    taskState = TaskState.PAUSED;
+-                    publish(progressCallback, buildSearchRetryMessage(deliveredCount, executionResult.detail()));
++    private synchronized void scheduleRest(Liepin.RestRequest request,
++                                           Consumer<JobProgressMessage> progressCallback) {
++        if (request == null || !isRunning || shouldStop()) {
++            taskState = TaskState.CANCELLED;
++            publish(progressCallback, JobProgressMessage.warning(PLATFORM, "投递任务已取消"));
++            finishRun();
++            return;
++        }
++
++        LiepinConfig config = configForRest();
++        long delayMillis = ThreadLocalRandom.current().nextLong(
++                config.effectiveMaxPerRunRestMinSeconds(),
++                (long) config.effectiveMaxPerRunRestMaxSeconds() + 1L
++        ) * 1000L;
++        restRequest = request;
++        restReason = request.reason();
++        restUntil = System.currentTimeMillis() + delayMillis;
++        restAttempt++;
++        taskState = TaskState.RESTING;
++
++        // 休息期间不占用登录监控或平台任务租约；恢复时重新取得。
++        releaseTaskLease();
++        publish(progressCallback, JobProgressMessage.warning(PLATFORM,
++                String.format("%s，休息%s后自动继续（第%d次）",
++                        request.message(), formatRestDelay(delayMillis), restAttempt)));
++        try {
++            scheduledResume = deliveryResumeScheduler.schedule(() -> {
++                synchronized (LiepinJobService.this) {
++                    if (!isRunning || shouldStop() || taskState != TaskState.RESTING) {
++                        return;
++                    }
++                    scheduledResume = null;
++                    acquireTaskLease();
++                    restReason = null;
++                    restUntil = 0L;
++                    taskState = TaskState.WAITING;
+@@ -726,3 +854,9 @@ public class LiepinJobService implements JobPlatformService {
+-                case COMPLETED -> {
+-                    taskState = TaskState.COMPLETED;
+-                    publish(progressCallback, buildCompletionMessage(deliveredCount, deliverySummary));
++                publish(progressCallback, JobProgressMessage.info(PLATFORM,
++                        "间歇休息结束，准备恢复任务"));
++                try {
++                    deliveryExecutor.execute(() -> runClaimed(progressCallback));
++                } catch (RuntimeException e) {
++                    taskState = TaskState.FAILED;
++                    publish(progressCallback, JobProgressMessage.error(PLATFORM,
++                            "提交休息后的恢复任务失败: " + e.getMessage()));
++                    finishRun();
+@@ -730,10 +864,2 @@ public class LiepinJobService implements JobPlatformService {
+-            }
+-        } catch (Liepin.PageLifecycleException e) {
+-            log.error("猎聘投递任务因页面生命周期中断", e);
+-            taskState = TaskState.FAILED;
+-            String message = e.sideEffectStarted()
+-                    ? "浏览器页面在发送过程中失效，发送结果不确定，任务已暂停，请检查后重试"
+-                    : "猎聘页面已失效，任务已暂停，请重新启动投递";
+-            publish(progressCallback, JobProgressMessage.error(PLATFORM, message));
+-        } catch (Exception e) {
+-            log.error("猎聘投递任务执行失败", e);
++            }, delayMillis, TimeUnit.MILLISECONDS);
++        } catch (RuntimeException e) {
+@@ -741,3 +867,2 @@ public class LiepinJobService implements JobPlatformService {
+-            publish(progressCallback, JobProgressMessage.error(PLATFORM, "投递失败: " + e.getMessage()));
+-        } finally {
+-            refreshRunStats(liepin);
++            publish(progressCallback, JobProgressMessage.error(PLATFORM,
++                    "创建间歇休息调度失败: " + e.getMessage()));
+@@ -747,0 +873,7 @@ public class LiepinJobService implements JobPlatformService {
++    private String formatRestDelay(long delayMillis) {
++        long seconds = Math.max(1L, delayMillis / 1000L);
++        return seconds >= 60L
++                ? String.format("%d分%d秒", seconds / 60L, seconds % 60L)
++                : seconds + "秒";
++    }
++
+@@ -1002 +1134,6 @@ public class LiepinJobService implements JobPlatformService {
+-    private void finishRun() {
++    private synchronized void finishRun() {
++        ScheduledFuture<?> pending = scheduledResume;
++        if (pending != null) {
++            pending.cancel(false);
++        }
++        scheduledResume = null;
+@@ -1005,0 +1143,5 @@ public class LiepinJobService implements JobPlatformService {
++        restReason = null;
++        restUntil = 0L;
++        restAttempt = 0;
++        restRequest = null;
++        activeLiepin = null;
+@@ -1067 +1208,0 @@ public class LiepinJobService implements JobPlatformService {
+-        taskState = TaskState.STOPPING;
+@@ -1069,0 +1211,13 @@ public class LiepinJobService implements JobPlatformService {
++        if (taskState == TaskState.RESTING) {
++            ScheduledFuture<?> pending = scheduledResume;
++            if (pending != null) {
++                pending.cancel(false);
++            }
++            scheduledResume = null;
++            taskState = TaskState.CANCELLED;
++            publish(activeProgressCallback, JobProgressMessage.warning(PLATFORM,
++                    "投递已停止，已取消当前间歇休息"));
++            finishRun();
++            return;
++        }
++        taskState = TaskState.STOPPING;
+@@ -1126,0 +1281,4 @@ public class LiepinJobService implements JobPlatformService {
++        String currentRestReason = suspendedView ? null : restReason;
++        long currentRestUntil = suspendedView ? 0L : restUntil;
++        int currentRestAttempt = suspendedView ? 0 : restAttempt;
++        Liepin.RestRequest currentRestRequest = suspendedView ? null : restRequest;
+@@ -1134,0 +1293,13 @@ public class LiepinJobService implements JobPlatformService {
++        result.put("restReason", currentRestReason);
++        result.put("restUntil", currentRestUntil);
++        result.put("restRemainingMillis", currentRestUntil <= 0L
++                ? 0L : Math.max(0L, currentRestUntil - System.currentTimeMillis()));
++        result.put("restAttempt", currentRestAttempt);
++        if (currentRestRequest == null) {
++            result.put("resumeCursor", null);
++        } else {
++            Map<String, Object> resumeCursor = new HashMap<>();
++            resumeCursor.put("keyword", currentRestRequest.keyword());
++            resumeCursor.put("page", currentRestRequest.page());
++            result.put("resumeCursor", resumeCursor);
++        }
+diff --git a/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java b/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
+index f0ab92b..6cfff68 100644
+--- a/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
++++ b/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
+@@ -73 +73 @@ class Job51BehaviorTest {
+-        assertEquals(Job51Config.MAX_AI_PER_RUN, config.effectiveMaxPerRun());
++        assertEquals(99, config.effectiveMaxPerRun());
+@@ -77,0 +78,14 @@ class Job51BehaviorTest {
++    @Test
++    void maxPerRunZeroMeansUnlimitedAndRestRangeIsConfigurable() {
++        Job51Config config = new Job51Config();
++        config.setMaxPerRun(0);
++        config.setStopAfterMaxPerRun(false);
++        config.setMaxPerRunRestMinSeconds(45);
++        config.setMaxPerRunRestMaxSeconds(90);
++
++        assertEquals(0, config.effectiveMaxPerRun());
++        assertFalse(config.isStopAfterMaxPerRun());
++        assertEquals(45, config.effectiveMaxPerRunRestMinSeconds());
++        assertEquals(90, config.effectiveMaxPerRunRestMaxSeconds());
++    }
++
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java
+index ab407c7..9cd8104 100644
+--- a/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java
+@@ -78,0 +79,14 @@ class LiepinConfigTest {
++
++    @Test
++    void maxPerRunZeroMeansUnlimitedAndRestRangeIsConfigurable() {
++        LiepinConfig config = new LiepinConfig();
++        config.setMaxPerRun(0);
++        config.setStopAfterMaxPerRun(false);
++        config.setMaxPerRunRestMinSeconds(45);
++        config.setMaxPerRunRestMaxSeconds(90);
++
++        assertEquals(0, config.effectiveMaxPerRun());
++        assertFalse(config.isStopAfterMaxPerRun());
++        assertEquals(45, config.effectiveMaxPerRunRestMinSeconds());
++        assertEquals(90, config.effectiveMaxPerRunRestMaxSeconds());
++    }
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+index 8ad58e1..937fc76 100644
+--- a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+@@ -131 +131 @@ class LiepinRateGuardTest {
+-    void configFloorsLegacyValuesToConservativeDefaults() {
++    void configFloorsLegacyDelayValuesToConservativeDefaults() {
+@@ -145 +145 @@ class LiepinRateGuardTest {
+-        assertEquals(10, config.effectiveMaxPerRun());
++        assertEquals(30, config.effectiveMaxPerRun());
+diff --git a/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+index 154c4c7..b5eda5a 100644
+--- a/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
++++ b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+@@ -19,0 +20 @@ import static org.mockito.Mockito.when;
++import static org.mockito.Mockito.verify;
+@@ -138,0 +140,22 @@ class LiepinJobServiceDeliveryTest {
++    @Test
++    void restingTaskCancelsScheduledResumeImmediately() throws Exception {
++        PlaywrightManager playwrightManager = mock(PlaywrightManager.class);
++        when(playwrightManager.isLoggedIn("liepin")).thenReturn(false);
++        LiepinJobService service = new LiepinJobService(
++                playwrightManager,
++                mock(ConfigService.class),
++                mock(ObjectProvider.class),
++                mock(LiepinService.class)
++        );
++        java.util.concurrent.ScheduledFuture<?> pending = mock(java.util.concurrent.ScheduledFuture.class);
++        setField(service, "isRunning", true);
++        setField(service, "taskState", LiepinJobService.TaskState.RESTING);
++        setField(service, "scheduledResume", pending);
++
++        service.stopDelivery();
++
++        verify(pending).cancel(false);
++        assertEquals(false, service.isRunning());
++        assertEquals("CANCELLED", service.getStatus().get("taskState"));
++    }
++

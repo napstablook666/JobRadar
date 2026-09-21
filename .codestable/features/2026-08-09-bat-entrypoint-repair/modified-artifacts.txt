@@ -1,0 +1,9 @@
+start.bat
+stop.bat
+restart.bat
+进度白板.md
+
+Evidence:
+bat-entrypoint-repair.patch
+validation-record.md
+rollback-bat-entrypoint-repair.ps1

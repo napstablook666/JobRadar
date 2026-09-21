@@ -1,0 +1,16 @@
+本轮修改产物
+
+src/main/java/com/getjobs/worker/manager/ReadRequestStatus.java
+src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
+src/main/java/com/getjobs/worker/liepin/Liepin.java
+src/main/java/com/getjobs/worker/job51/Job51.java
+src/main/java/com/getjobs/worker/service/LiepinJobService.java
+src/main/java/com/getjobs/worker/service/Job51JobService.java
+src/main/resources/application.yaml
+src/test/java/com/getjobs/worker/manager/PlaywrightManagerModeTest.java
+src/test/java/com/getjobs/worker/manager/BrowserSessionSnapshotTest.java
+src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java
+
+验证副本：
+patch-check-2/
+baseline/

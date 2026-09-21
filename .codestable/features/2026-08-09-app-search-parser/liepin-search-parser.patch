@@ -1,0 +1,498 @@
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index 4720fd3..292c280 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -458,83 +458,227 @@ public class Liepin {
+     }
+ 
+     // ========== 解析接口JSON并保存到数据库 ==========
++    private static final Set<String> SEARCH_LIST_KEYS = Set.of(
++            "jobcardlist", "joblist", "jobs", "items", "results", "records", "list");
++    private static final String[] JOB_NODES = {
++            "job", "jobInfo", "jobDetail", "position", "jobData", "detail"};
++    private static final String[] COMPANY_NODES = {
++            "comp", "company", "companyInfo", "enterprise"};
++    private static final String[] RECRUITER_NODES = {
++            "recruiter", "recruiterInfo", "hr", "hrInfo"};
++
+     private boolean parseAndPersistLiepinData(String json) {
++        SearchParseResult parsed = parseSearchEntities(json);
++        if (!parsed.recognized()) {
++            log.warn("解析猎聘搜索响应失败: {}", parsed.detail());
++            return false;
++        }
++
++        lastApiEntities.clear();
++        lastApiEntities.addAll(parsed.entities());
++        // 批量持久化：重试模式只刷新目标快照，避免把新扫描岗位带入本次任务。
+         try {
+-            ObjectMapper mapper = new ObjectMapper();
+-            JsonNode root = mapper.readTree(json);
+-            // 兼容两种结构：data.data.jobCardList 或 data.jobCardList
+-            JsonNode cardList = root.path("data").path("data").path("jobCardList");
+-            if (!cardList.isArray()) {
+-                cardList = root.path("data").path("jobCardList");
+-            }
+-            if (!cardList.isArray()) {
+-                return false;
++            List<LiepinEntity> snapshots = isPendingRetryMode()
++                    ? lastApiEntities.stream()
++                    .filter(entity -> shouldRetryPendingJob(pendingRetryJobIds, entity.getJobId()))
++                    .toList()
++                    : lastApiEntities;
++            liepinService.insertSnapshotsIfNotExistsBatch(snapshots);
++            for (LiepinEntity entity : snapshots) {
++                liepinService.updateJobDescription(entity.getJobId(), entity.getJobDescription());
++            }
++        } catch (Exception e) {
++            log.warn("批量保存猎聘岗位数据失败: {}", e.getMessage());
++        }
++        return true;
++    }
++
++    /** 将搜索响应的结构识别与字段映射集中到可回归测试的纯解析入口。 */
++    static SearchParseResult parseSearchEntities(String json) {
++        if (json == null || json.isBlank()) {
++            return new SearchParseResult(false, List.of(), "搜索响应正文为空");
++        }
++        String trimmed = json.trim();
++        if (trimmed.startsWith("<")) {
++            return new SearchParseResult(false, List.of(), "搜索响应不是JSON正文");
++        }
++
++        try {
++            JsonNode root = new ObjectMapper().readTree(trimmed);
++            if (root == null || root.isNull()) {
++                return new SearchParseResult(false, List.of(), "搜索响应JSON为空");
++            }
++            SearchListCandidate candidate = findJobList(root);
++            if (candidate == null) {
++                return new SearchParseResult(false, List.of(),
++                        "岗位列表未找到，" + describeResponseShape(root, trimmed.length()));
+             }
+-            lastApiEntities.clear();
+-            for (JsonNode item : cardList) {
+-                JsonNode job = item.path("job");
+-                JsonNode comp = item.path("comp");
+-                JsonNode recruiter = item.path("recruiter");
+ 
+-                Long jobId = readLong(job.path("jobId"));
+-                if (jobId == null) {
+-                    continue;
+-                }
++            List<LiepinEntity> entities = new ArrayList<>();
++            for (JsonNode item : candidate.list()) {
++                JsonNode job = firstObject(item, JOB_NODES);
++                JsonNode company = firstObject(item, COMPANY_NODES);
++                JsonNode recruiter = firstObject(item, RECRUITER_NODES);
++                Long jobId = readJobId(item);
++                if (jobId == null) continue;
+ 
+                 LiepinEntity entity = new LiepinEntity();
+                 entity.setJobId(jobId);
+-                entity.setJobTitle(readText(job.path("title")));
+-                entity.setJobLink(readText(job.path("link")));
+-                entity.setJobDescription(readFirstText(job,
+-                        "jobDesc", "description", "jobDescription", "postDescription", "detail", "requirement"));
+-                entity.setJobSalaryText(readText(job.path("salary")));
+-                entity.setJobArea(readText(job.path("dq")));
+-                entity.setJobEduReq(readText(job.path("requireEduLevel")));
+-                entity.setJobExpReq(readText(job.path("requireWorkYears")));
+-                entity.setJobPublishTime(readText(job.path("refreshTime")));
+-
+-                entity.setCompId(readLong(comp.path("compId")));
+-                entity.setCompName(readText(comp.path("compName")));
+-                entity.setCompIndustry(readText(comp.path("compIndustry")));
+-                entity.setCompScale(readText(comp.path("compScale")));
+-
+-                entity.setHrId(readText(recruiter.path("recruiterId")));
+-                entity.setHrName(readText(recruiter.path("recruiterName")));
+-                entity.setHrTitle(readText(recruiter.path("recruiterTitle")));
+-                entity.setHrImId(readText(recruiter.path("imId")));
+-
+-                // 缓存到内存供页面投递显示使用（避免从页面读取文本）
+-                lastApiEntities.add(entity);
+-            }
+-            // 批量持久化：重试模式只刷新目标快照，避免把新扫描岗位带入本次任务。
+-            try {
+-                List<LiepinEntity> snapshots = isPendingRetryMode()
+-                        ? lastApiEntities.stream()
+-                        .filter(entity -> shouldRetryPendingJob(pendingRetryJobIds, entity.getJobId()))
+-                        .toList()
+-                        : lastApiEntities;
+-                liepinService.insertSnapshotsIfNotExistsBatch(snapshots);
+-                for (LiepinEntity entity : snapshots) {
+-                    liepinService.updateJobDescription(entity.getJobId(), entity.getJobDescription());
++                entity.setJobTitle(readFirstText(job, item, "title", "jobTitle", "jobName"));
++                entity.setJobLink(readFirstText(job, item, "link", "jobLink", "jobUrl", "url"));
++                entity.setJobDescription(readFirstText(job, item,
++                        "jobDesc", "description", "jobDescription", "postDescription",
++                        "detail", "requirement", "jobIntro", "jobDuty", "jobRequirement"));
++                entity.setJobSalaryText(readFirstText(job, item,
++                        "salary", "salaryDesc", "salaryText", "provideSalaryString"));
++                entity.setJobArea(readFirstText(job, item, "dq", "area", "jobArea", "cityName"));
++                entity.setJobEduReq(readFirstText(job, item,
++                        "requireEduLevel", "degree", "degreeString"));
++                entity.setJobExpReq(readFirstText(job, item,
++                        "requireWorkYears", "workYear", "workYearString"));
++                entity.setJobPublishTime(readFirstText(job, item,
++                        "refreshTime", "issueDate", "issueDateString", "updateDate"));
++
++                entity.setCompId(readLongFromKeys(company,
++                        "compId", "companyId", "compID", "company_id"));
++                entity.setCompName(readFirstText(company, item,
++                        "compName", "companyName", "fullCompanyName", "ctmName"));
++                entity.setCompIndustry(readFirstText(company, item,
++                        "compIndustry", "industry", "industryName"));
++                entity.setCompScale(readFirstText(company, item,
++                        "compScale", "companySize", "companySizeString"));
++
++                entity.setHrId(readFirstText(recruiter, item,
++                        "recruiterId", "hrUid", "hrId"));
++                entity.setHrName(readFirstText(recruiter, item,
++                        "recruiterName", "hrName"));
++                entity.setHrTitle(readFirstText(recruiter, item,
++                        "recruiterTitle", "hrPosition"));
++                entity.setHrImId(readFirstText(recruiter, item, "imId", "imID"));
++                entities.add(entity);
++            }
++            return new SearchParseResult(true, List.copyOf(entities),
++                    "岗位列表路径=" + candidate.path());
++        } catch (Exception e) {
++            String message = e.getMessage();
++            return new SearchParseResult(false, List.of(),
++                    "搜索响应JSON解析异常: "
++                            + (message == null || message.isBlank()
++                            ? e.getClass().getSimpleName() : message));
++        }
++    }
++
++    private static SearchListCandidate findJobList(JsonNode root) {
++        String[][] paths = {
++                {"data", "data", "jobCardList"}, {"data", "jobCardList"},
++                {"data", "data", "jobList"}, {"data", "jobList"},
++                {"data", "data", "jobs"}, {"data", "jobs"},
++                {"data", "data", "items"}, {"data", "items"},
++                {"data", "data", "results"}, {"data", "results"},
++                {"result", "data", "jobCardList"}, {"result", "data", "jobList"},
++                {"result", "data", "items"}, {"result", "jobCardList"},
++                {"result", "jobList"}, {"result", "items"},
++                {"resultData", "jobCardList"}, {"resultData", "jobList"},
++                {"jobCardList"}, {"jobList"}, {"jobs"}, {"items"},
++                {"results"}, {"list"}
++        };
++        for (String[] path : paths) {
++            JsonNode node = atPath(root, path);
++            if (isSupportedJobList(node)) {
++                return new SearchListCandidate(node, String.join(".", path));
++            }
++        }
++        return findArrayByKey(root, "$root");
++    }
++
++    private static JsonNode atPath(JsonNode root, String[] path) {
++        JsonNode node = root;
++        for (String part : path) {
++            if (node == null || !node.isObject()) return null;
++            node = node.path(part);
++        }
++        return node;
++    }
++
++    private static boolean isSupportedJobList(JsonNode node) {
++        return node != null && node.isArray()
++                && (node.size() == 0 || containsJobRecord(node));
++    }
++
++    private static SearchListCandidate findArrayByKey(JsonNode node, String path) {
++        if (node == null || node.isNull()) return null;
++        if (node.isObject()) {
++            java.util.Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
++            while (fields.hasNext()) {
++                Map.Entry<String, JsonNode> field = fields.next();
++                JsonNode value = field.getValue();
++                String key = normalizeFieldName(field.getKey());
++                if (SEARCH_LIST_KEYS.contains(key) && isSupportedJobList(value)) {
++                    return new SearchListCandidate(value, path + "." + field.getKey());
+                 }
+-            } catch (Exception e) {
+-                log.warn("批量保存猎聘岗位数据失败: {}", e.getMessage());
+             }
+-            return true;
+-        } catch (Exception e) {
+-            log.warn("解析猎聘JSON失败: {}", e.getMessage());
+-            return false;
++            fields = node.fields();
++            while (fields.hasNext()) {
++                Map.Entry<String, JsonNode> field = fields.next();
++                SearchListCandidate nested = findArrayByKey(
++                        field.getValue(), path + "." + field.getKey());
++                if (nested != null) return nested;
++            }
++        } else if (node.isArray()) {
++            for (int i = 0; i < node.size(); i++) {
++                SearchListCandidate nested = findArrayByKey(node.get(i), path + "[" + i + "]");
++                if (nested != null) return nested;
++            }
+         }
++        return null;
+     }
+ 
+-    private String readText(JsonNode node) {
+-        if (node == null || node.isMissingNode() || node.isNull()) return null;
+-        String v = node.asText();
+-        return (v == null || v.isEmpty()) ? null : v;
++    private static boolean containsJobRecord(JsonNode list) {
++        for (JsonNode item : list) {
++            if (readJobId(item) != null) return true;
++        }
++        return false;
++    }
++
++    private static Long readJobId(JsonNode item) {
++        Long direct = readLongFromKeys(item,
++                "jobId", "job_id", "jobID", "jobid", "jobIdStr", "postId", "positionId");
++        if (direct != null) return direct;
++        if (item == null || !item.isObject()) return null;
++        for (String key : JOB_NODES) {
++            JsonNode nested = item.path(key);
++            Long value = readLongFromKeys(nested,
++                    "jobId", "job_id", "jobID", "jobid", "jobIdStr", "postId", "positionId");
++            if (value != null) return value;
++        }
++        return null;
++    }
++
++    private static Long readLongFromKeys(JsonNode item, String... keys) {
++        if (item == null || !item.isObject()) return null;
++        for (String key : keys) {
++            Long value = readLong(item.path(key));
++            if (value != null && value > 0) return value;
++        }
++        return null;
+     }
+ 
+-    private String readFirstText(JsonNode parent, String... names) {
+-        if (parent == null || names == null) return null;
++    private static JsonNode firstObject(JsonNode parent, String... names) {
++        if (parent == null || !parent.isObject()) return null;
++        for (String name : names) {
++            JsonNode child = parent.path(name);
++            if (child.isObject()) return child;
++        }
++        return null;
++    }
++
++    private static String readFirstText(JsonNode primary, JsonNode fallback, String... names) {
++        String value = readFirstText(primary, names);
++        return value == null ? readFirstText(fallback, names) : value;
++    }
++
++    private static String readFirstText(JsonNode parent, String... names) {
++        if (parent == null || !parent.isObject() || names == null) return null;
+         for (String name : names) {
+             String value = readText(parent.path(name));
+             if (value != null && !value.isBlank()) return value;
+@@ -542,21 +686,48 @@ public class Liepin {
+         return null;
+     }
+ 
+-    private Long readLong(JsonNode node) {
++    private static String readText(JsonNode node) {
+         if (node == null || node.isMissingNode() || node.isNull()) return null;
++        String value = node.asText(null);
++        return value == null || value.isBlank() || "null".equalsIgnoreCase(value)
++                ? null : value.trim();
++    }
++
++    private static Long readLong(JsonNode node) {
++        String value = readText(node);
++        if (value == null) return null;
+         try {
+-            if (node.isNumber()) {
+-                long v = node.asLong();
+-                return v == 0 ? null : v;
+-            }
+-            if (node.isTextual()) {
+-                String t = node.asText();
+-                if (t == null || t.isEmpty()) return null;
+-                long v = Long.parseLong(t.trim());
+-                return v == 0 ? null : v;
+-            }
+-        } catch (Exception ignored) {}
+-        return null;
++            long parsed = Long.parseLong(value);
++            return parsed == 0 ? null : parsed;
++        } catch (Exception ignored) {
++            return null;
++        }
++    }
++
++    private static String normalizeFieldName(String name) {
++        return name == null ? "" : name.toLowerCase(Locale.ROOT).replace("_", "").replace("-", "");
++    }
++
++    private static String describeResponseShape(JsonNode root, int bodyLength) {
++        if (root == null) return "响应长度=" + bodyLength + "，根节点为空";
++        if (!root.isObject()) {
++            return "响应长度=" + bodyLength + "，根节点类型=" + root.getNodeType();
++        }
++        StringBuilder keys = new StringBuilder();
++        java.util.Iterator<String> fields = root.fieldNames();
++        int count = 0;
++        while (fields.hasNext() && count < 12) {
++            if (count > 0) keys.append(',');
++            keys.append(fields.next());
++            count++;
++        }
++        return "响应长度=" + bodyLength + "，顶层字段=" + keys;
++    }
++
++    record SearchParseResult(boolean recognized, List<LiepinEntity> entities, String detail) {
++    }
++
++    private record SearchListCandidate(JsonNode list, String path) {
+     }
+ 
+     private String safeText(String s) {
+@@ -1079,7 +1250,11 @@ public class Liepin {
+             );
+             validateSearchResponse(response);
+             if (!parseSearchResponse(response)) {
+-                throw new IllegalStateException("猎聘浏览器搜索响应未解析到岗位数据结构");
++                String browserDetail = "猎聘浏览器搜索响应未解析到岗位数据结构";
++                readRequestStatus = ReadRequestStatus.browser(
++                        httpAttempted, firstNonBlank(httpFailureDetail, browserDetail));
++                log.warn("猎聘搜索响应结构异常，当前关键词保留等待重试: {}", browserDetail);
++                return false;
+             }
+             readRequestStatus = ReadRequestStatus.browser(httpAttempted,
+                     httpAttempted && !httpFailureDetail.isBlank()
+@@ -1265,7 +1440,14 @@ public class Liepin {
+                 rateGuard.completed(action);
+                 return true;
+             }
+-            String fallbackDetail = fallback == null ? "HTTP回退无结果" : fallback.detail();
++            String fallbackDetail;
++            if (fallback == null) {
++                fallbackDetail = "HTTP回退无结果";
++            } else if (fallback.success()) {
++                fallbackDetail = "HTTP回退响应未解析到岗位数据结构";
++            } else {
++                fallbackDetail = firstNonBlank(fallback.detail(), "HTTP回退未返回可用结果");
++            }
+             readRequestStatus = ReadRequestStatus.browser(true, browserDetail + "；" + fallbackDetail);
+             log.warn("猎聘{}失败，当前页保留等待重试: {}", operation, fallbackDetail);
+             return false;
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinSearchResponseTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinSearchResponseTest.java
+new file mode 100644
+index 0000000..9fa35ec
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinSearchResponseTest.java
+@@ -0,0 +1,92 @@
++package com.getjobs.worker.liepin;
++
++import com.getjobs.application.entity.LiepinEntity;
++import org.junit.jupiter.api.Test;
++
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class LiepinSearchResponseTest {
++
++    @Test
++    void parsesExistingNestedJobCardShape() {
++        Liepin.SearchParseResult result = Liepin.parseSearchEntities("""
++                {"data":{"data":{"jobCardList":[
++                  {"job":{"jobId":"1001","title":"Application Engineer","link":"/job/1001",
++                    "salary":"8-12K","jobDesc":"Device support"},
++                   "comp":{"compId":"88","compName":"Example Co"},
++                   "recruiter":{"recruiterId":"r1","recruiterName":"Recruiter"}}
++                ]}}}
++                """);
++
++        assertTrue(result.recognized());
++        assertEquals("data.data.jobCardList", result.detail().substring("岗位列表路径=".length()));
++        LiepinEntity entity = result.entities().get(0);
++        assertEquals(1001L, entity.getJobId());
++        assertEquals("Application Engineer", entity.getJobTitle());
++        assertEquals("Device support", entity.getJobDescription());
++        assertEquals(88L, entity.getCompId());
++        assertEquals("Recruiter", entity.getHrName());
++    }
++
++    @Test
++    void parsesAlternateEnvelopeAndDirectFields() {
++        Liepin.SearchParseResult result = Liepin.parseSearchEntities("""
++                {"result":{"data":{"items":[
++                  {"job_id":"1002","jobTitle":"Device Support","salaryText":"9-13K",
++                   "company":{"companyId":"89","companyName":"Example Labs"},
++                   "hrName":"Hiring Manager"}
++                ]}}}
++                """);
++
++        assertTrue(result.recognized());
++        LiepinEntity entity = result.entities().get(0);
++        assertEquals(1002L, entity.getJobId());
++        assertEquals("Device Support", entity.getJobTitle());
++        assertEquals("9-13K", entity.getJobSalaryText());
++        assertEquals(89L, entity.getCompId());
++        assertEquals("Hiring Manager", entity.getHrName());
++    }
++
++    @Test
++    void findsNestedRecordsWithPositionId() {
++        Liepin.SearchParseResult result = Liepin.parseSearchEntities("""
++                {"wrapper":{"payload":{"records":[
++                  {"job":{"positionId":1003,"jobName":"Field Specialist"}}
++                ]}}}
++                """);
++
++        assertTrue(result.recognized());
++        assertEquals(1003L, result.entities().get(0).getJobId());
++        assertEquals("Field Specialist", result.entities().get(0).getJobTitle());
++    }
++
++    @Test
++    void acceptsKnownEmptyJobList() {
++        Liepin.SearchParseResult result = Liepin.parseSearchEntities(
++                "{\"data\":{\"jobCardList\":[]}}");
++
++        assertTrue(result.recognized());
++        assertTrue(result.entities().isEmpty());
++    }
++
++    @Test
++    void rejectsJsonWithoutAJobRecordList() {
++        Liepin.SearchParseResult result = Liepin.parseSearchEntities(
++                "{\"data\":{\"items\":[{\"recommendationId\":1}]}}");
++
++        assertFalse(result.recognized());
++        assertTrue(result.detail().contains("岗位列表未找到"));
++        assertTrue(result.detail().contains("顶层字段=data"));
++    }
++
++    @Test
++    void rejectsBlankHtmlAndMalformedJson() {
++        assertFalse(Liepin.parseSearchEntities(" ").recognized());
++        assertFalse(Liepin.parseSearchEntities("<html>challenge</html>").recognized());
++        assertFalse(Liepin.parseSearchEntities("{broken").recognized());
++    }
++}
+diff --git "a/\350\277\233\345\272\246\347\231\275\346\235\277.md" "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+index 5e39b49..39ff615 100644
+--- "a/\350\277\233\345\272\246\347\231\275\346\235\277.md"
++++ "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+@@ -224,3 +224,9 @@
+ 🔨 正在做：无 —— 本轮 Cookie 登录修复已落盘。
+ ⬜ 还没做：用户重新登录其它平台后再进行真实恢复复测。
+ ❓ 需要你决定：无。
++
++✅ 已完成：猎聘暂缓岗位搜索解析修复 —— 浏览器搜索响应支持多层包装、岗位字段变体、嵌套岗位 ID 和空列表，结构异常进入可重试暂停。
++✅ 已完成：解析修复回归与回滚产物 —— Java 全量 190 个测试通过，定向解析测试、补丁回放和隔离回滚均通过。
++🔨 正在做：无 —— 本轮源码、测试和 CodeStable 产物已完成。
++⬜ 还没做：无。
++❓ 需要你决定：无。

@@ -1,0 +1,938 @@
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index 61e421f..21e8218 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -26,6 +26,15 @@ interface LiepinConfig {
+   maxPerRun?: number
+   minDelaySeconds?: number
+   maxDelaySeconds?: number
++  searchMinDelaySeconds?: number
++  searchMaxDelaySeconds?: number
++  pageMinDelaySeconds?: number
++  pageMaxDelaySeconds?: number
++  detailMinDelaySeconds?: number
++  detailMaxDelaySeconds?: number
++  rateGuardBatchSize?: number
++  batchCooldownMinSeconds?: number
++  batchCooldownMaxSeconds?: number
+ }
+ 
+ interface PageProgressItem {
+@@ -92,8 +101,17 @@ export default function LiepinPage() {
+     aiReviewMinScore: 60,
+     aiBatchSize: 5,
+     maxPerRun: 10,
+-    minDelaySeconds: 90,
+-    maxDelaySeconds: 180,
++    minDelaySeconds: 120,
++    maxDelaySeconds: 240,
++    searchMinDelaySeconds: 60,
++    searchMaxDelaySeconds: 120,
++    pageMinDelaySeconds: 30,
++    pageMaxDelaySeconds: 60,
++    detailMinDelaySeconds: 45,
++    detailMaxDelaySeconds: 90,
++    rateGuardBatchSize: 5,
++    batchCooldownMinSeconds: 1200,
++    batchCooldownMaxSeconds: 1800,
+   })
+   const [options, setOptions] = useState<LiepinOptions>({
+     city: [],
+@@ -261,8 +279,21 @@ export default function LiepinPage() {
+         normalized.aiReviewMinScore = Math.max(0, Math.min(normalized.aiMinScore, data.config.aiReviewMinScore ?? 60))
+         normalized.aiBatchSize = Math.max(3, Math.min(10, data.config.aiBatchSize ?? 5))
+         normalized.maxPerRun = Math.min(data.config.maxPerRun ?? 10, 10)
+-        normalized.minDelaySeconds = Math.max(data.config.minDelaySeconds ?? 90, 90)
+-        normalized.maxDelaySeconds = Math.max(data.config.maxDelaySeconds ?? 180, normalized.minDelaySeconds, 180)
++        normalized.minDelaySeconds = Math.max(data.config.minDelaySeconds ?? 120, 120)
++        normalized.maxDelaySeconds = Math.max(data.config.maxDelaySeconds ?? 240, normalized.minDelaySeconds, 240)
++        normalized.searchMinDelaySeconds = Math.max(15, Math.min(300, data.config.searchMinDelaySeconds ?? 60))
++        normalized.searchMaxDelaySeconds = Math.max(normalized.searchMinDelaySeconds,
++          Math.min(300, Math.max(120, data.config.searchMaxDelaySeconds ?? 120)))
++        normalized.pageMinDelaySeconds = Math.max(15, Math.min(300, data.config.pageMinDelaySeconds ?? 30))
++        normalized.pageMaxDelaySeconds = Math.max(normalized.pageMinDelaySeconds,
++          Math.min(300, Math.max(60, data.config.pageMaxDelaySeconds ?? 60)))
++        normalized.detailMinDelaySeconds = Math.max(15, Math.min(300, data.config.detailMinDelaySeconds ?? 45))
++        normalized.detailMaxDelaySeconds = Math.max(normalized.detailMinDelaySeconds,
++          Math.min(300, Math.max(90, data.config.detailMaxDelaySeconds ?? 90)))
++        normalized.rateGuardBatchSize = Math.max(1, Math.min(10, data.config.rateGuardBatchSize ?? 5))
++        normalized.batchCooldownMinSeconds = Math.max(300, Math.min(3600, data.config.batchCooldownMinSeconds ?? 1200))
++        normalized.batchCooldownMaxSeconds = Math.max(normalized.batchCooldownMinSeconds,
++          Math.min(3600, data.config.batchCooldownMaxSeconds ?? 1800))
+         setConfig(normalized)
+         // 检查当前城市是否在选项列表中
+         if (data.options?.city && data.config.city) {
+@@ -848,9 +879,9 @@ export default function LiepinPage() {
+                 <Input
+                   id="minDelaySeconds"
+                   type="number"
+-                  min={90}
++                  min={120}
+                   max={300}
+-                  value={config.minDelaySeconds ?? 90}
++                  value={config.minDelaySeconds ?? 120}
+                   onChange={(e) => setConfig({ ...config, minDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -859,13 +890,115 @@ export default function LiepinPage() {
+                 <Input
+                   id="maxDelaySeconds"
+                   type="number"
+-                  min={90}
++                  min={120}
+                   max={300}
+-                  value={config.maxDelaySeconds ?? 180}
++                  value={config.maxDelaySeconds ?? 240}
+                   onChange={(e) => setConfig({ ...config, maxDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
++              <div className="space-y-2">
++                <Label htmlFor="searchMinDelaySeconds">搜索最小间隔（秒）</Label>
++                <Input
++                  id="searchMinDelaySeconds"
++                  type="number"
++                  min={15}
++                  max={300}
++                  value={config.searchMinDelaySeconds ?? 60}
++                  onChange={(e) => setConfig({ ...config, searchMinDelaySeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="searchMaxDelaySeconds">搜索最大间隔（秒）</Label>
++                <Input
++                  id="searchMaxDelaySeconds"
++                  type="number"
++                  min={15}
++                  max={300}
++                  value={config.searchMaxDelaySeconds ?? 120}
++                  onChange={(e) => setConfig({ ...config, searchMaxDelaySeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="pageMinDelaySeconds">翻页最小间隔（秒）</Label>
++                <Input
++                  id="pageMinDelaySeconds"
++                  type="number"
++                  min={15}
++                  max={300}
++                  value={config.pageMinDelaySeconds ?? 30}
++                  onChange={(e) => setConfig({ ...config, pageMinDelaySeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="pageMaxDelaySeconds">翻页最大间隔（秒）</Label>
++                <Input
++                  id="pageMaxDelaySeconds"
++                  type="number"
++                  min={15}
++                  max={300}
++                  value={config.pageMaxDelaySeconds ?? 60}
++                  onChange={(e) => setConfig({ ...config, pageMaxDelaySeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="detailMinDelaySeconds">详情最小间隔（秒）</Label>
++                <Input
++                  id="detailMinDelaySeconds"
++                  type="number"
++                  min={15}
++                  max={300}
++                  value={config.detailMinDelaySeconds ?? 45}
++                  onChange={(e) => setConfig({ ...config, detailMinDelaySeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="detailMaxDelaySeconds">详情最大间隔（秒）</Label>
++                <Input
++                  id="detailMaxDelaySeconds"
++                  type="number"
++                  min={15}
++                  max={300}
++                  value={config.detailMaxDelaySeconds ?? 90}
++                  onChange={(e) => setConfig({ ...config, detailMaxDelaySeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="rateGuardBatchSize">批次成功次数</Label>
++                <Input
++                  id="rateGuardBatchSize"
++                  type="number"
++                  min={1}
++                  max={10}
++                  value={config.rateGuardBatchSize ?? 5}
++                  onChange={(e) => setConfig({ ...config, rateGuardBatchSize: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="batchCooldownMinSeconds">批次冷却最小值（秒）</Label>
++                <Input
++                  id="batchCooldownMinSeconds"
++                  type="number"
++                  min={300}
++                  max={3600}
++                  value={config.batchCooldownMinSeconds ?? 1200}
++                  onChange={(e) => setConfig({ ...config, batchCooldownMinSeconds: Number(e.target.value) })}
++                />
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="batchCooldownMaxSeconds">批次冷却最大值（秒）</Label>
++                <Input
++                  id="batchCooldownMaxSeconds"
++                  type="number"
++                  min={300}
++                  max={3600}
++                  value={config.batchCooldownMaxSeconds ?? 1800}
++                  onChange={(e) => setConfig({ ...config, batchCooldownMaxSeconds: Number(e.target.value) })}
++                />
++              </div>
+             </div>
++            <p className="mt-3 text-xs text-muted-foreground">
++              当前保守基线：搜索 60-120 秒、翻页 30-60 秒、详情 45-90 秒、发送 120-240 秒；命中平台风控信号后任务会停止并记录原因。
++            </p>
+             <div className="mt-6 space-y-3 rounded-md border p-4">
+               <div className="flex flex-wrap items-center justify-between gap-3">
+                 <div>
+diff --git a/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java b/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+index 2f00608..3160b95 100644
+--- a/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
++++ b/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+@@ -50,6 +50,33 @@ public class LiepinConfigEntity {
+     /** 岗位之间最大等待秒数 */
+     private Integer maxDelaySeconds;
+ 
++    /** 搜索动作之间最小等待秒数 */
++    private Integer searchMinDelaySeconds;
++
++    /** 搜索动作之间最大等待秒数 */
++    private Integer searchMaxDelaySeconds;
++
++    /** 翻页动作之间最小等待秒数 */
++    private Integer pageMinDelaySeconds;
++
++    /** 翻页动作之间最大等待秒数 */
++    private Integer pageMaxDelaySeconds;
++
++    /** 详情动作之间最小等待秒数 */
++    private Integer detailMinDelaySeconds;
++
++    /** 详情动作之间最大等待秒数 */
++    private Integer detailMaxDelaySeconds;
++
++    /** 成功发送多少次后进入批次冷却 */
++    private Integer rateGuardBatchSize;
++
++    /** 批次冷却最小等待秒数 */
++    private Integer batchCooldownMinSeconds;
++
++    /** 批次冷却最大等待秒数 */
++    private Integer batchCooldownMaxSeconds;
++
+     /** 创建时间 */
+     private LocalDateTime createdAt;
+ 
+diff --git a/src/main/java/com/getjobs/application/service/ConfigService.java b/src/main/java/com/getjobs/application/service/ConfigService.java
+index 4cfabf9..ac90482 100644
+--- a/src/main/java/com/getjobs/application/service/ConfigService.java
++++ b/src/main/java/com/getjobs/application/service/ConfigService.java
+@@ -261,6 +261,24 @@ public class ConfigService {
+                 ? LiepinConfig.DEFAULT_MIN_DELAY_SECONDS : entity.getMinDelaySeconds());
+         config.setMaxDelaySeconds(entity == null || entity.getMaxDelaySeconds() == null
+                 ? LiepinConfig.DEFAULT_MAX_DELAY_SECONDS : entity.getMaxDelaySeconds());
++        config.setSearchMinDelaySeconds(entity == null || entity.getSearchMinDelaySeconds() == null
++                ? LiepinConfig.DEFAULT_SEARCH_MIN_DELAY_SECONDS : entity.getSearchMinDelaySeconds());
++        config.setSearchMaxDelaySeconds(entity == null || entity.getSearchMaxDelaySeconds() == null
++                ? LiepinConfig.DEFAULT_SEARCH_MAX_DELAY_SECONDS : entity.getSearchMaxDelaySeconds());
++        config.setPageMinDelaySeconds(entity == null || entity.getPageMinDelaySeconds() == null
++                ? LiepinConfig.DEFAULT_PAGE_MIN_DELAY_SECONDS : entity.getPageMinDelaySeconds());
++        config.setPageMaxDelaySeconds(entity == null || entity.getPageMaxDelaySeconds() == null
++                ? LiepinConfig.DEFAULT_PAGE_MAX_DELAY_SECONDS : entity.getPageMaxDelaySeconds());
++        config.setDetailMinDelaySeconds(entity == null || entity.getDetailMinDelaySeconds() == null
++                ? LiepinConfig.DEFAULT_DETAIL_MIN_DELAY_SECONDS : entity.getDetailMinDelaySeconds());
++        config.setDetailMaxDelaySeconds(entity == null || entity.getDetailMaxDelaySeconds() == null
++                ? LiepinConfig.DEFAULT_DETAIL_MAX_DELAY_SECONDS : entity.getDetailMaxDelaySeconds());
++        config.setRateGuardBatchSize(entity == null || entity.getRateGuardBatchSize() == null
++                ? LiepinConfig.DEFAULT_RATE_GUARD_BATCH_SIZE : entity.getRateGuardBatchSize());
++        config.setBatchCooldownMinSeconds(entity == null || entity.getBatchCooldownMinSeconds() == null
++                ? LiepinConfig.DEFAULT_BATCH_COOLDOWN_MIN_SECONDS : entity.getBatchCooldownMinSeconds());
++        config.setBatchCooldownMaxSeconds(entity == null || entity.getBatchCooldownMaxSeconds() == null
++                ? LiepinConfig.DEFAULT_BATCH_COOLDOWN_MAX_SECONDS : entity.getBatchCooldownMaxSeconds());
+ 
+         return config;
+     }
+diff --git a/src/main/java/com/getjobs/application/service/LiepinService.java b/src/main/java/com/getjobs/application/service/LiepinService.java
+index 3bc9b23..34dbdc6 100644
+--- a/src/main/java/com/getjobs/application/service/LiepinService.java
++++ b/src/main/java/com/getjobs/application/service/LiepinService.java
+@@ -95,10 +95,37 @@ public class LiepinService {
+                 stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_per_run INTEGER DEFAULT 10");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN min_delay_seconds INTEGER DEFAULT 90");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN min_delay_seconds INTEGER DEFAULT 120");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_delay_seconds INTEGER DEFAULT 180");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_delay_seconds INTEGER DEFAULT 240");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN search_min_delay_seconds INTEGER DEFAULT 60");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN search_max_delay_seconds INTEGER DEFAULT 120");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN page_min_delay_seconds INTEGER DEFAULT 30");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN page_max_delay_seconds INTEGER DEFAULT 60");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN detail_min_delay_seconds INTEGER DEFAULT 45");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN detail_max_delay_seconds INTEGER DEFAULT 90");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN rate_guard_batch_size INTEGER DEFAULT 5");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN batch_cooldown_min_seconds INTEGER DEFAULT 1200");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN batch_cooldown_max_seconds INTEGER DEFAULT 1800");
+             } catch (Exception ignored) {}
+             // 分页断点续跑进度表
+             stmt.execute(
+@@ -596,6 +623,33 @@ public class LiepinService {
+         if (config.getMaxDelaySeconds() != null) {
+             existing.setMaxDelaySeconds(config.getMaxDelaySeconds());
+         }
++        if (config.getSearchMinDelaySeconds() != null) {
++            existing.setSearchMinDelaySeconds(config.getSearchMinDelaySeconds());
++        }
++        if (config.getSearchMaxDelaySeconds() != null) {
++            existing.setSearchMaxDelaySeconds(config.getSearchMaxDelaySeconds());
++        }
++        if (config.getPageMinDelaySeconds() != null) {
++            existing.setPageMinDelaySeconds(config.getPageMinDelaySeconds());
++        }
++        if (config.getPageMaxDelaySeconds() != null) {
++            existing.setPageMaxDelaySeconds(config.getPageMaxDelaySeconds());
++        }
++        if (config.getDetailMinDelaySeconds() != null) {
++            existing.setDetailMinDelaySeconds(config.getDetailMinDelaySeconds());
++        }
++        if (config.getDetailMaxDelaySeconds() != null) {
++            existing.setDetailMaxDelaySeconds(config.getDetailMaxDelaySeconds());
++        }
++        if (config.getRateGuardBatchSize() != null) {
++            existing.setRateGuardBatchSize(config.getRateGuardBatchSize());
++        }
++        if (config.getBatchCooldownMinSeconds() != null) {
++            existing.setBatchCooldownMinSeconds(config.getBatchCooldownMinSeconds());
++        }
++        if (config.getBatchCooldownMaxSeconds() != null) {
++            existing.setBatchCooldownMaxSeconds(config.getBatchCooldownMaxSeconds());
++        }
+         applyDeliveryDefaults(existing);
+         existing.setUpdatedAt(LocalDateTime.now());
+         liepinConfigMapper.updateById(existing);
+@@ -627,6 +681,15 @@ public class LiepinService {
+         if (config.getMaxPerRun() == null) config.setMaxPerRun(LiepinConfig.DEFAULT_MAX_PER_RUN);
+         if (config.getMinDelaySeconds() == null) config.setMinDelaySeconds(LiepinConfig.DEFAULT_MIN_DELAY_SECONDS);
+         if (config.getMaxDelaySeconds() == null) config.setMaxDelaySeconds(LiepinConfig.DEFAULT_MAX_DELAY_SECONDS);
++        if (config.getSearchMinDelaySeconds() == null) config.setSearchMinDelaySeconds(LiepinConfig.DEFAULT_SEARCH_MIN_DELAY_SECONDS);
++        if (config.getSearchMaxDelaySeconds() == null) config.setSearchMaxDelaySeconds(LiepinConfig.DEFAULT_SEARCH_MAX_DELAY_SECONDS);
++        if (config.getPageMinDelaySeconds() == null) config.setPageMinDelaySeconds(LiepinConfig.DEFAULT_PAGE_MIN_DELAY_SECONDS);
++        if (config.getPageMaxDelaySeconds() == null) config.setPageMaxDelaySeconds(LiepinConfig.DEFAULT_PAGE_MAX_DELAY_SECONDS);
++        if (config.getDetailMinDelaySeconds() == null) config.setDetailMinDelaySeconds(LiepinConfig.DEFAULT_DETAIL_MIN_DELAY_SECONDS);
++        if (config.getDetailMaxDelaySeconds() == null) config.setDetailMaxDelaySeconds(LiepinConfig.DEFAULT_DETAIL_MAX_DELAY_SECONDS);
++        if (config.getRateGuardBatchSize() == null) config.setRateGuardBatchSize(LiepinConfig.DEFAULT_RATE_GUARD_BATCH_SIZE);
++        if (config.getBatchCooldownMinSeconds() == null) config.setBatchCooldownMinSeconds(LiepinConfig.DEFAULT_BATCH_COOLDOWN_MIN_SECONDS);
++        if (config.getBatchCooldownMaxSeconds() == null) config.setBatchCooldownMaxSeconds(LiepinConfig.DEFAULT_BATCH_COOLDOWN_MAX_SECONDS);
+         if (config.getMaxPerRun() < 1) {
+             throw new IllegalArgumentException("猎聘单次岗位上限必须大于0");
+         }
+@@ -636,13 +699,37 @@ public class LiepinService {
+                 Math.max(config.getMaxDelaySeconds(), LiepinConfig.DEFAULT_MAX_DELAY_SECONDS),
+                 config.getMinDelaySeconds()
+         ));
++        config.setSearchMinDelaySeconds(clamp(config.getSearchMinDelaySeconds(), LiepinConfig.MIN_RATE_DELAY_SECONDS,
++                LiepinConfig.MAX_RATE_DELAY_SECONDS));
++        config.setSearchMaxDelaySeconds(Math.max(config.getSearchMinDelaySeconds(),
++                clamp(config.getSearchMaxDelaySeconds(), LiepinConfig.MIN_RATE_DELAY_SECONDS, LiepinConfig.MAX_RATE_DELAY_SECONDS)));
++        config.setPageMinDelaySeconds(clamp(config.getPageMinDelaySeconds(), LiepinConfig.MIN_RATE_DELAY_SECONDS,
++                LiepinConfig.MAX_RATE_DELAY_SECONDS));
++        config.setPageMaxDelaySeconds(Math.max(config.getPageMinDelaySeconds(),
++                clamp(config.getPageMaxDelaySeconds(), LiepinConfig.MIN_RATE_DELAY_SECONDS, LiepinConfig.MAX_RATE_DELAY_SECONDS)));
++        config.setDetailMinDelaySeconds(clamp(config.getDetailMinDelaySeconds(), LiepinConfig.MIN_RATE_DELAY_SECONDS,
++                LiepinConfig.MAX_RATE_DELAY_SECONDS));
++        config.setDetailMaxDelaySeconds(Math.max(config.getDetailMinDelaySeconds(),
++                clamp(config.getDetailMaxDelaySeconds(), LiepinConfig.MIN_RATE_DELAY_SECONDS, LiepinConfig.MAX_RATE_DELAY_SECONDS)));
++        config.setRateGuardBatchSize(clamp(config.getRateGuardBatchSize(), LiepinConfig.MIN_RATE_GUARD_BATCH_SIZE,
++                LiepinConfig.MAX_RATE_GUARD_BATCH_SIZE));
++        config.setBatchCooldownMinSeconds(clamp(config.getBatchCooldownMinSeconds(),
++                LiepinConfig.MIN_BATCH_COOLDOWN_SECONDS, LiepinConfig.MAX_BATCH_COOLDOWN_SECONDS));
++        config.setBatchCooldownMaxSeconds(Math.max(config.getBatchCooldownMinSeconds(),
++                clamp(config.getBatchCooldownMaxSeconds(), LiepinConfig.MIN_BATCH_COOLDOWN_SECONDS,
++                        LiepinConfig.MAX_BATCH_COOLDOWN_SECONDS)));
+         if (config.getMinDelaySeconds() < 0
+                 || config.getMaxDelaySeconds() < config.getMinDelaySeconds()
+-                || config.getMaxDelaySeconds() > 300) {
+-            throw new IllegalArgumentException("猎聘发送等待需满足 90<=最小秒数<=最大秒数<=300");
++                || config.getMaxDelaySeconds() > LiepinConfig.MAX_RATE_DELAY_SECONDS) {
++            throw new IllegalArgumentException("猎聘发送等待需满足 120<=最小秒数<=最大秒数<=300");
+         }
+     }
+ 
++    private int clamp(Integer value, int min, int max) {
++        int resolved = value == null ? min : value;
++        return Math.max(min, Math.min(max, resolved));
++    }
++
+     private String normalizeDeliveryMode(String value) {
+         if (value == null) return "MANUAL";
+         String normalized = value.trim().toUpperCase(Locale.ROOT);
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index 66108fa..156be4f 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -209,8 +209,7 @@ public class Liepin {
+         this.rateGuard = LiepinRateGuard.production(
+                 this::shouldStop,
+                 this::info,
+-                config.effectiveMinDelaySeconds(),
+-                config.effectiveMaxDelaySeconds()
++                config
+         );
+     }
+ 
+@@ -429,8 +428,10 @@ public class Liepin {
+         if (maxPerRun < 1) {
+             throw new IllegalArgumentException("猎聘单次岗位上限必须大于0");
+         }
+-        if (minDelay < 0 || maxDelay < minDelay || maxDelay > 300) {
+-            throw new IllegalArgumentException("猎聘随机等待需满足 0<=最小秒数<=最大秒数<=300");
++        if (minDelay < LiepinConfig.MIN_SAFE_SEND_DELAY_SECONDS
++                || maxDelay < minDelay
++                || maxDelay > LiepinConfig.MAX_RATE_DELAY_SECONDS) {
++            throw new IllegalArgumentException("猎聘发送间隔需满足 120<=最小秒数<=最大秒数<=300");
+         }
+         if ((config.isAutoAiDeliveryEnabled() || config.isBatchShadowEnabled()) && !config.isAiEnabled()) {
+             throw new IllegalArgumentException("开启AI投递模式前，请先开启AI招呼语");
+@@ -612,6 +613,7 @@ public class Liepin {
+                 );
+                 validateSearchResponse(response);
+                 parseSearchResponse(response);
++                rateGuard.completed(LiepinRateGuard.Action.SEARCH);
+                 return true;
+             } catch (RateLimitSignalException signal) {
+                 throw signal;
+@@ -640,6 +642,7 @@ public class Liepin {
+             );
+             validateSearchResponse(response);
+             parseSearchResponse(response);
++            rateGuard.completed(LiepinRateGuard.Action.PAGE);
+             return true;
+         } catch (RateLimitSignalException signal) {
+             throw signal;
+@@ -690,11 +693,48 @@ public class Liepin {
+             rateGuard.stopForSignal(reason);
+             throw new RateLimitSignalException(reason + "，本次任务已停止");
+         }
++        String signal = detectRiskSignal(readResponseText(response));
++        if (signal != null) {
++            rateGuard.stopForSignal("响应出现风控信号：" + signal);
++            throw new RateLimitSignalException("响应出现风控信号：" + signal + "，本次任务已停止");
++        }
+         if (status < 200 || status >= 300) {
+             throw new IllegalStateException("猎聘搜索响应状态异常: " + status);
+         }
+     }
+ 
++    private String readResponseText(Response response) {
++        try {
++            return response == null ? null : response.text();
++        } catch (Exception ignored) {
++            return null;
++        }
++    }
++
++    static String detectRiskSignal(String text) {
++        if (text == null || text.isBlank()) return null;
++        String normalized = text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
++        String[] signals = {
++                "请求频繁", "访问频繁", "操作频繁", "频繁操作", "访问受限", "操作受限",
++                "安全验证", "人机验证", "验证码", "行为异常", "账号异常", "请稍后再试",
++                "toomanyrequests", "captcha", "forbidden", "rate_limit"
++        };
++        for (String signal : signals) {
++            if (normalized.contains(signal)) return signal;
++        }
++        return null;
++    }
++
++    private void stopForVisibleRiskSignal() {
++        try {
++            String signal = detectRiskSignal(page.locator("body").innerText());
++            if (signal != null) {
++                rateGuard.stopForSignal("页面出现风控信号：" + signal);
++            }
++        } catch (Exception ignored) {
++        }
++    }
++
+     /** @param zeroBasedPage 猎聘 URL 的 currentPage，从 0 起 */
+     private String getSearchUrl(int zeroBasedPage) {
+         String baseUrl = "https://www.liepin.com/zhaopin/?";
+@@ -1072,7 +1112,8 @@ public class Liepin {
+                                 sendResult.aiApplied()
+                                         ? (sendResult.resumeApplied() ? "AI话术和猎聘简历" : "AI话术")
+                                         : "猎聘预设语"));
+-                        if (!rateGuard.afterSuccessfulSend()) return PageScanResult.STOPPED;
++                        if (!rateGuard.afterSuccessfulSend(
++                                resultList.size() < config.effectiveMaxPerRun())) return PageScanResult.STOPPED;
+                         if (resultList.size() >= config.effectiveMaxPerRun()) {
+                             info(String.format("已达到本次成功聊天上限%d个", config.effectiveMaxPerRun()));
+                             return PageScanResult.LIMIT_REACHED;
+@@ -1352,7 +1393,8 @@ public class Liepin {
+             if (job.jobId() != null) liepinService.markDelivered(job.jobId());
+             info(String.format("【%s】【%s】已发送AI话术%s", job.companyName(), job.jobName(),
+                     sendResult.resumeApplied() ? "和简历" : ""));
+-            if (!rateGuard.afterSuccessfulSend()) return PageScanResult.STOPPED;
++            if (!rateGuard.afterSuccessfulSend(
++                    resultList.size() < config.effectiveMaxPerRun())) return PageScanResult.STOPPED;
+             if (resultList.size() >= config.effectiveMaxPerRun()) {
+                 info(String.format("已达到本次成功聊天上限%d个", config.effectiveMaxPerRun()));
+                 return PageScanResult.LIMIT_REACHED;
+@@ -1490,6 +1532,7 @@ public class Liepin {
+             }
+             log.warn("读取猎聘岗位JD失败 job_id={}, link={}: {}", entity.getJobId(), link, e.getMessage());
+         } finally {
++            rateGuard.completed(LiepinRateGuard.Action.DETAIL);
+             if (detailPage != null) {
+                 try {
+                     detailPage.close();
+@@ -1604,6 +1647,7 @@ public class Liepin {
+             button.click();
+             boolean presetSent = waitForNewOutgoingMessage(initialOutgoingMessages, 20000);
+             if (!presetSent) {
++                stopForVisibleRiskSignal();
+                 log.warn("猎聘平台默认沟通语未在聊天窗口确认");
+                 closeChatWindow();
+                 return new SendResult(false, false, false);
+@@ -1632,6 +1676,8 @@ public class Liepin {
+             log.warn("猎聘聊天发送确认失败: {}", e.getMessage());
+             closeChatWindow();
+             return new SendResult(false, false, false);
++        } finally {
++            rateGuard.completed(LiepinRateGuard.Action.SEND);
+         }
+     }
+ 
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+index 91e840c..5322a90 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+@@ -12,9 +12,24 @@ import java.util.List;
+ public class LiepinConfig {
+     public static final int MAX_SAFE_PER_RUN = 10;
+     public static final int DEFAULT_MAX_PER_RUN = 10;
+-    public static final int MIN_SAFE_SEND_DELAY_SECONDS = 90;
+-    public static final int DEFAULT_MIN_DELAY_SECONDS = 90;
+-    public static final int DEFAULT_MAX_DELAY_SECONDS = 180;
++    public static final int MIN_SAFE_SEND_DELAY_SECONDS = 120;
++    public static final int DEFAULT_MIN_DELAY_SECONDS = 120;
++    public static final int DEFAULT_MAX_DELAY_SECONDS = 240;
++    public static final int MIN_RATE_DELAY_SECONDS = 15;
++    public static final int MAX_RATE_DELAY_SECONDS = 300;
++    public static final int DEFAULT_SEARCH_MIN_DELAY_SECONDS = 60;
++    public static final int DEFAULT_SEARCH_MAX_DELAY_SECONDS = 120;
++    public static final int DEFAULT_PAGE_MIN_DELAY_SECONDS = 30;
++    public static final int DEFAULT_PAGE_MAX_DELAY_SECONDS = 60;
++    public static final int DEFAULT_DETAIL_MIN_DELAY_SECONDS = 45;
++    public static final int DEFAULT_DETAIL_MAX_DELAY_SECONDS = 90;
++    public static final int DEFAULT_RATE_GUARD_BATCH_SIZE = 5;
++    public static final int MIN_RATE_GUARD_BATCH_SIZE = 1;
++    public static final int MAX_RATE_GUARD_BATCH_SIZE = 10;
++    public static final int DEFAULT_BATCH_COOLDOWN_MIN_SECONDS = 1200;
++    public static final int DEFAULT_BATCH_COOLDOWN_MAX_SECONDS = 1800;
++    public static final int MIN_BATCH_COOLDOWN_SECONDS = 300;
++    public static final int MAX_BATCH_COOLDOWN_SECONDS = 3600;
+     public static final int DEFAULT_AI_MIN_SCORE = 70;
+     public static final int DEFAULT_AI_REVIEW_MIN_SCORE = 60;
+     public static final int DEFAULT_AI_BATCH_SIZE = 5;
+@@ -65,6 +80,33 @@ public class LiepinConfig {
+     /** 岗位之间的最大随机等待秒数 */
+     private Integer maxDelaySeconds = DEFAULT_MAX_DELAY_SECONDS;
+ 
++    /** 搜索动作之间的最小随机等待秒数 */
++    private Integer searchMinDelaySeconds = DEFAULT_SEARCH_MIN_DELAY_SECONDS;
++
++    /** 搜索动作之间的最大随机等待秒数 */
++    private Integer searchMaxDelaySeconds = DEFAULT_SEARCH_MAX_DELAY_SECONDS;
++
++    /** 翻页动作之间的最小随机等待秒数 */
++    private Integer pageMinDelaySeconds = DEFAULT_PAGE_MIN_DELAY_SECONDS;
++
++    /** 翻页动作之间的最大随机等待秒数 */
++    private Integer pageMaxDelaySeconds = DEFAULT_PAGE_MAX_DELAY_SECONDS;
++
++    /** 详情动作之间的最小随机等待秒数 */
++    private Integer detailMinDelaySeconds = DEFAULT_DETAIL_MIN_DELAY_SECONDS;
++
++    /** 详情动作之间的最大随机等待秒数 */
++    private Integer detailMaxDelaySeconds = DEFAULT_DETAIL_MAX_DELAY_SECONDS;
++
++    /** 成功发送多少次后进入批次冷却 */
++    private Integer rateGuardBatchSize = DEFAULT_RATE_GUARD_BATCH_SIZE;
++
++    /** 批次冷却的最小随机等待秒数 */
++    private Integer batchCooldownMinSeconds = DEFAULT_BATCH_COOLDOWN_MIN_SECONDS;
++
++    /** 批次冷却的最大随机等待秒数 */
++    private Integer batchCooldownMaxSeconds = DEFAULT_BATCH_COOLDOWN_MAX_SECONDS;
++
+     public boolean isAiEnabled() {
+         return enableAI == null || enableAI;
+     }
+@@ -112,16 +154,68 @@ public class LiepinConfig {
+     }
+ 
+     public int effectiveMinDelaySeconds() {
+-        return Math.max(minDelaySeconds == null ? DEFAULT_MIN_DELAY_SECONDS : minDelaySeconds,
+-                MIN_SAFE_SEND_DELAY_SECONDS);
++        return effectiveRangeMin(minDelaySeconds, DEFAULT_MIN_DELAY_SECONDS, MIN_SAFE_SEND_DELAY_SECONDS,
++                MAX_RATE_DELAY_SECONDS);
+     }
+ 
+     public int effectiveMaxDelaySeconds() {
+-        return Math.max(
+-                Math.max(maxDelaySeconds == null ? DEFAULT_MAX_DELAY_SECONDS : maxDelaySeconds,
+-                        DEFAULT_MAX_DELAY_SECONDS),
+-                effectiveMinDelaySeconds()
+-        );
++        return effectiveRangeMax(maxDelaySeconds, DEFAULT_MAX_DELAY_SECONDS, effectiveMinDelaySeconds(),
++                MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectiveSearchMinDelaySeconds() {
++        return effectiveRangeMin(searchMinDelaySeconds, DEFAULT_SEARCH_MIN_DELAY_SECONDS,
++                MIN_RATE_DELAY_SECONDS, MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectiveSearchMaxDelaySeconds() {
++        return effectiveRangeMax(searchMaxDelaySeconds, DEFAULT_SEARCH_MAX_DELAY_SECONDS,
++                effectiveSearchMinDelaySeconds(), MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectivePageMinDelaySeconds() {
++        return effectiveRangeMin(pageMinDelaySeconds, DEFAULT_PAGE_MIN_DELAY_SECONDS,
++                MIN_RATE_DELAY_SECONDS, MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectivePageMaxDelaySeconds() {
++        return effectiveRangeMax(pageMaxDelaySeconds, DEFAULT_PAGE_MAX_DELAY_SECONDS,
++                effectivePageMinDelaySeconds(), MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectiveDetailMinDelaySeconds() {
++        return effectiveRangeMin(detailMinDelaySeconds, DEFAULT_DETAIL_MIN_DELAY_SECONDS,
++                MIN_RATE_DELAY_SECONDS, MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectiveDetailMaxDelaySeconds() {
++        return effectiveRangeMax(detailMaxDelaySeconds, DEFAULT_DETAIL_MAX_DELAY_SECONDS,
++                effectiveDetailMinDelaySeconds(), MAX_RATE_DELAY_SECONDS);
++    }
++
++    public int effectiveRateGuardBatchSize() {
++        int value = rateGuardBatchSize == null ? DEFAULT_RATE_GUARD_BATCH_SIZE : rateGuardBatchSize;
++        return Math.max(MIN_RATE_GUARD_BATCH_SIZE, Math.min(MAX_RATE_GUARD_BATCH_SIZE, value));
++    }
++
++    public int effectiveBatchCooldownMinSeconds() {
++        return effectiveRangeMin(batchCooldownMinSeconds, DEFAULT_BATCH_COOLDOWN_MIN_SECONDS,
++                MIN_BATCH_COOLDOWN_SECONDS, MAX_BATCH_COOLDOWN_SECONDS);
++    }
++
++    public int effectiveBatchCooldownMaxSeconds() {
++        return effectiveRangeMax(batchCooldownMaxSeconds, DEFAULT_BATCH_COOLDOWN_MAX_SECONDS,
++                effectiveBatchCooldownMinSeconds(), MAX_BATCH_COOLDOWN_SECONDS);
++    }
++
++    private int effectiveRangeMin(Integer value, int fallback, int floor, int ceiling) {
++        int resolved = value == null ? fallback : value;
++        return Math.max(floor, Math.min(ceiling, resolved));
++    }
++
++    private int effectiveRangeMax(Integer value, int fallback, int min, int ceiling) {
++        int resolved = value == null ? fallback : value;
++        return Math.max(min, Math.min(ceiling, Math.max(fallback, resolved)));
+     }
+ 
+ }
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java b/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
+index 16198d0..7ddbfaf 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
+@@ -11,24 +11,17 @@ import java.util.function.Supplier;
+  */
+ final class LiepinRateGuard {
+     static final int MAX_SAFE_PER_RUN = LiepinConfig.MAX_SAFE_PER_RUN;
+-    static final int BATCH_SIZE = 5;
+-    static final int BATCH_COOLDOWN_MIN_SECONDS = 1200;
+-    static final int BATCH_COOLDOWN_MAX_SECONDS = 1800;
+ 
+     enum Action {
+-        SEARCH("搜索", 30, 60),
+-        PAGE("翻页", 15, 30),
+-        DETAIL("详情", 20, 40),
+-        SEND("发送", 90, 180);
++        SEARCH("搜索"),
++        PAGE("翻页"),
++        DETAIL("详情"),
++        SEND("发送");
+ 
+         private final String label;
+-        private final int minSeconds;
+-        private final int maxSeconds;
+ 
+-        Action(String label, int minSeconds, int maxSeconds) {
++        Action(String label) {
+             this.label = label;
+-            this.minSeconds = minSeconds;
+-            this.maxSeconds = maxSeconds;
+         }
+     }
+ 
+@@ -50,7 +43,12 @@ final class LiepinRateGuard {
+     private final LongSupplier clock;
+     private final Sleeper sleeper;
+     private final IntBinaryOperator randomSeconds;
++    private final DelayRange searchRange;
++    private final DelayRange pageRange;
++    private final DelayRange detailRange;
+     private final DelayRange sendRange;
++    private final int batchSize;
++    private final DelayRange batchCooldownRange;
+     private long lastActivityAt = -1L;
+     private int successfulSendCount;
+     private boolean stopped;
+@@ -58,18 +56,20 @@ final class LiepinRateGuard {
+     static LiepinRateGuard production(
+             Supplier<Boolean> shouldStop,
+             Consumer<String> info,
+-            int configuredSendMin,
+-            int configuredSendMax
++            LiepinConfig config
+     ) {
+-        int min = Math.max(LiepinConfig.MIN_SAFE_SEND_DELAY_SECONDS, configuredSendMin);
+-        int max = Math.max(LiepinConfig.DEFAULT_MAX_DELAY_SECONDS, configuredSendMax);
+         return new LiepinRateGuard(
+                 shouldStop,
+                 info,
+                 System::currentTimeMillis,
+                 Thread::sleep,
+                 (low, high) -> java.util.concurrent.ThreadLocalRandom.current().nextInt(low, high + 1),
+-                new DelayRange(min, Math.max(min, max))
++                new DelayRange(config.effectiveSearchMinDelaySeconds(), config.effectiveSearchMaxDelaySeconds()),
++                new DelayRange(config.effectivePageMinDelaySeconds(), config.effectivePageMaxDelaySeconds()),
++                new DelayRange(config.effectiveDetailMinDelaySeconds(), config.effectiveDetailMaxDelaySeconds()),
++                new DelayRange(config.effectiveMinDelaySeconds(), config.effectiveMaxDelaySeconds()),
++                config.effectiveRateGuardBatchSize(),
++                new DelayRange(config.effectiveBatchCooldownMinSeconds(), config.effectiveBatchCooldownMaxSeconds())
+         );
+     }
+ 
+@@ -80,13 +80,46 @@ final class LiepinRateGuard {
+             Sleeper sleeper,
+             IntBinaryOperator randomSeconds,
+             DelayRange sendRange
++    ) {
++        this(
++                shouldStop,
++                info,
++                clock,
++                sleeper,
++                randomSeconds,
++                new DelayRange(30, 60),
++                new DelayRange(15, 30),
++                new DelayRange(20, 40),
++                sendRange,
++                5,
++                new DelayRange(1200, 1800)
++        );
++    }
++
++    LiepinRateGuard(
++            Supplier<Boolean> shouldStop,
++            Consumer<String> info,
++            LongSupplier clock,
++            Sleeper sleeper,
++            IntBinaryOperator randomSeconds,
++            DelayRange searchRange,
++            DelayRange pageRange,
++            DelayRange detailRange,
++            DelayRange sendRange,
++            int batchSize,
++            DelayRange batchCooldownRange
+     ) {
+         this.shouldStop = shouldStop;
+         this.info = info;
+         this.clock = clock;
+         this.sleeper = sleeper;
+         this.randomSeconds = randomSeconds;
++        this.searchRange = searchRange;
++        this.pageRange = pageRange;
++        this.detailRange = detailRange;
+         this.sendRange = sendRange;
++        this.batchSize = batchSize;
++        this.batchCooldownRange = batchCooldownRange;
+     }
+ 
+     boolean before(Action action) {
+@@ -96,11 +129,17 @@ final class LiepinRateGuard {
+         return isActive();
+     }
+ 
+-    boolean afterSuccessfulSend() {
++    void completed(Action action) {
++        if (isActive()) {
++            lastActivityAt = clock.getAsLong();
++        }
++    }
++
++    boolean afterSuccessfulSend(boolean hasRemainingWork) {
+         successfulSendCount++;
+-        if (successfulSendCount % BATCH_SIZE != 0) return isActive();
+-        boolean cooled = waitFor("完成" + BATCH_SIZE + "次发送后的批次冷却",
+-                new DelayRange(BATCH_COOLDOWN_MIN_SECONDS, BATCH_COOLDOWN_MAX_SECONDS));
++        if (!hasRemainingWork || successfulSendCount % batchSize != 0) return isActive();
++        lastActivityAt = clock.getAsLong();
++        boolean cooled = waitFor("完成" + batchSize + "次发送后的批次冷却", batchCooldownRange);
+         if (cooled) info.accept("批次冷却完成，继续处理后续岗位");
+         return cooled && isActive();
+     }
+@@ -115,9 +154,12 @@ final class LiepinRateGuard {
+     }
+ 
+     private DelayRange rangeFor(Action action) {
+-        return action == Action.SEND
+-                ? sendRange
+-                : new DelayRange(action.minSeconds, action.maxSeconds);
++        return switch (action) {
++            case SEARCH -> searchRange;
++            case PAGE -> pageRange;
++            case DETAIL -> detailRange;
++            case SEND -> sendRange;
++        };
+     }
+ 
+     private boolean waitFor(String label, DelayRange range) {
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+index f847e32..060f947 100644
+--- a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNull;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+ 
+ class LiepinRateGuardTest {
+@@ -93,14 +94,28 @@ class LiepinRateGuardTest {
+ 
+         assertTrue(guard.before(LiepinRateGuard.Action.SEND));
+         for (int i = 0; i < 4; i++) {
+-            assertTrue(guard.afterSuccessfulSend());
++            assertTrue(guard.afterSuccessfulSend(true));
+         }
+         assertEquals(0L, now.get());
+ 
+-        assertTrue(guard.afterSuccessfulSend());
++        assertTrue(guard.afterSuccessfulSend(true));
+         assertEquals(1_200_000L, now.get());
+     }
+ 
++    @Test
++    void finalSuccessfulSendDoesNotStartUnusedBatchCooldown() {
++        AtomicLong now = new AtomicLong(0);
++        LiepinRateGuard guard = newGuard(now, new ArrayList<>());
++
++        assertTrue(guard.before(LiepinRateGuard.Action.SEND));
++        for (int i = 0; i < 4; i++) {
++            assertTrue(guard.afterSuccessfulSend(true));
++        }
++
++        assertTrue(guard.afterSuccessfulSend(false));
++        assertEquals(0L, now.get());
++    }
++
+     @Test
+     void stopSignalPreventsAnotherAction() {
+         AtomicLong now = new AtomicLong(0);
+@@ -118,10 +133,60 @@ class LiepinRateGuardTest {
+         config.setMaxPerRun(30);
+         config.setMinDelaySeconds(2);
+         config.setMaxDelaySeconds(5);
++        config.setSearchMinDelaySeconds(1);
++        config.setSearchMaxDelaySeconds(2);
++        config.setBatchCooldownMinSeconds(1);
++        config.setBatchCooldownMaxSeconds(2);
+ 
+         assertEquals(10, config.effectiveMaxPerRun());
+-        assertEquals(90, config.effectiveMinDelaySeconds());
+-        assertEquals(180, config.effectiveMaxDelaySeconds());
++        assertEquals(120, config.effectiveMinDelaySeconds());
++        assertEquals(240, config.effectiveMaxDelaySeconds());
++        assertEquals(15, config.effectiveSearchMinDelaySeconds());
++        assertEquals(120, config.effectiveSearchMaxDelaySeconds());
++        assertEquals(300, config.effectiveBatchCooldownMinSeconds());
++        assertEquals(1800, config.effectiveBatchCooldownMaxSeconds());
++    }
++
++    @Test
++    void productionPolicyUsesConfiguredRanges() {
++        LiepinConfig config = new LiepinConfig();
++        config.setSearchMinDelaySeconds(70);
++        config.setSearchMaxDelaySeconds(80);
++        config.setPageMinDelaySeconds(35);
++        config.setPageMaxDelaySeconds(45);
++        config.setDetailMinDelaySeconds(50);
++        config.setDetailMaxDelaySeconds(60);
++        config.setMinDelaySeconds(130);
++        config.setMaxDelaySeconds(150);
++        config.setRateGuardBatchSize(3);
++        config.setBatchCooldownMinSeconds(600);
++        config.setBatchCooldownMaxSeconds(700);
++
++        AtomicLong now = new AtomicLong(0);
++        LiepinRateGuard guard = new LiepinRateGuard(
++                () -> false,
++                ignored -> { },
++                now::get,
++                now::addAndGet,
++                (min, max) -> min,
++                new LiepinRateGuard.DelayRange(70, 80),
++                new LiepinRateGuard.DelayRange(35, 45),
++                new LiepinRateGuard.DelayRange(50, 60),
++                new LiepinRateGuard.DelayRange(130, 150),
++                3,
++                new LiepinRateGuard.DelayRange(600, 700)
++        );
++
++        assertTrue(guard.before(LiepinRateGuard.Action.SEARCH));
++        assertTrue(guard.before(LiepinRateGuard.Action.PAGE));
++        assertEquals(35_000L, now.get());
++    }
++
++    @Test
++    void detectsBusinessRiskSignalsBesidesHttpStatus() {
++        assertEquals("请求频繁", Liepin.detectRiskSignal("message: 请求频繁，请稍后再试"));
++        assertEquals("captcha", Liepin.detectRiskSignal("captcha required"));
++        assertNull(Liepin.detectRiskSignal("normal job result"));
+     }
+ 
+     private LiepinRateGuard newGuard(AtomicLong now, List<String> messages) {

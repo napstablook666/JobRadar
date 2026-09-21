@@ -1,0 +1,13 @@
+Modified artifacts
+
+src/main/java/com/getjobs/worker/manager/PlaywrightManager.java
+src/main/java/com/getjobs/application/controller/PlaywrightController.java
+src/main/resources/application.yaml
+bin/start-services.ps1
+start.bat
+一键启动.bat
+src/test/java/com/getjobs/worker/manager/PlaywrightManagerModeTest.java
+进度白板.md
+
+Runtime rollback:
+rollback-browser-background.ps1

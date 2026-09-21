@@ -1,0 +1,396 @@
+diff --git a/codestable/issues/013-x-ff-liepin-keyword-mojibake.md b/codestable/issues/013-x-ff-liepin-keyword-mojibake.md
+new file mode 100644
+index 0000000..97fa710
+--- /dev/null
++++ b/codestable/issues/013-x-ff-liepin-keyword-mojibake.md
+@@ -0,0 +1,30 @@
++---
++kind: issue
++title: "APP 搜索关键词乱码修复"
++type: ff
++status: closed
++created: 2026-08-09
++epic: ""
++---
++
++# APP 搜索关键词乱码修复
++
++## 做了什么
++
++修复历史重复转码关键词在 APP 配置页、断点列表和搜索运行时的乱码问题；保存时统一写入规范 JSON。
++
++## 改了哪些
++
++- `front/lib/keyword-lines.ts`、`front/app/liepin/page.tsx` — 读取关键词和断点时还原旧编码文本。
++- `KeywordParser`、`LiepinPageProgress`、`LiepinService` — 统一解析、断点匹配和保存规范化。
++- 相关 Java 测试、`进度白板.md` — 补充回归与本轮记录。
++
++## 怎么验证的
++
++- Java 定向/全量测试通过；前端 `pnpm lint`、`pnpm build` 和 `git diff --check` 通过。
++- 真实页面回读旧数据库值后，文本框显示 18 个正常中文关键词；截图保存于 `target/codex-git/keyword-mojibake-ui.png`。
++
++## 对 codestable/ 的影响
++
++- 新增本条快改记录；没有长期规格真相需要同步。
++- 现有数据库保留原值，运行时读取修复，下一次保存完成规范化。
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index b06bd1a..d42576d 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label'
+ import { Select } from '@/components/ui/select'
+ import PageHeader from '@/app/components/PageHeader'
+ import CookieLoginCard from '@/app/components/CookieLoginCard'
+-import { keywordLinesForDisplay, keywordLinesForStorage } from '@/lib/keyword-lines'
++import { keywordLinesForDisplay, keywordLinesForStorage, repairUtf8Mojibake } from '@/lib/keyword-lines'
+ 
+ interface LiepinConfig {
+   id?: number
+@@ -156,6 +156,13 @@ interface LiepinOptions {
+   city: LiepinOption[]
+ }
+ 
++function normalizePageProgress(items: PageProgressItem[]): PageProgressItem[] {
++  return items.map((item) => ({
++    ...item,
++    keyword: repairUtf8Mojibake(item.keyword),
++  }))
++}
++
+ export default function LiepinPage() {
+   const [config, setConfig] = useState<LiepinConfig>({
+     keywords: '',
+@@ -378,7 +385,7 @@ export default function LiepinPage() {
+         setOptions(data.options)
+       }
+       if (Array.isArray(data.pageProgress)) {
+-        setPageProgress(data.pageProgress)
++        setPageProgress(normalizePageProgress(data.pageProgress))
+       } else {
+         setPageProgress([])
+       }
+@@ -397,7 +404,7 @@ export default function LiepinPage() {
+       if (!response.ok) {
+         throw new Error(data.message || '读取投递页码进度失败')
+       }
+-      setPageProgress(Array.isArray(data.pageProgress) ? data.pageProgress : [])
++      setPageProgress(Array.isArray(data.pageProgress) ? normalizePageProgress(data.pageProgress) : [])
+     } catch (error) {
+       console.warn('[猎聘] 刷新投递页码进度失败:', error)
+     }
+@@ -413,7 +420,7 @@ export default function LiepinPage() {
+       if (!response.ok || data.success === false) {
+         throw new Error(data.message || '重置失败')
+       }
+-      setPageProgress(Array.isArray(data.pageProgress) ? data.pageProgress : [])
++      setPageProgress(Array.isArray(data.pageProgress) ? normalizePageProgress(data.pageProgress) : [])
+       setSaveResult({ success: true, message: data.message || '投递页码进度已重置' })
+       setShowSaveDialog(true)
+     } catch (error) {
+diff --git a/front/lib/keyword-lines.ts b/front/lib/keyword-lines.ts
+index 261d454..93df8fd 100644
+--- a/front/lib/keyword-lines.ts
++++ b/front/lib/keyword-lines.ts
+@@ -1,3 +1,36 @@
++const utf8Decoder = new TextDecoder('utf-8', { fatal: true })
++
++function decodeLatin1AsUtf8(value: string): string | null {
++  const chars = Array.from(value)
++  if (chars.some((char) => char.charCodeAt(0) > 0xff)) {
++    return null
++  }
++
++  try {
++    return utf8Decoder.decode(Uint8Array.from(chars, (char) => char.charCodeAt(0)))
++  } catch {
++    return null
++  }
++}
++
++export function repairUtf8Mojibake(value?: string): string {
++  if (!value) return ''
++
++  let current = value
++  for (let round = 0; round < 3; round += 1) {
++    const candidate = decodeLatin1AsUtf8(current)
++    if (!candidate || candidate === current || candidate.includes('\uFFFD')) {
++      break
++    }
++    current = candidate
++  }
++  return current
++}
++
++function normalizeKeyword(value: unknown): string {
++  return repairUtf8Mojibake(String(value ?? '').trim())
++}
++
+ export function parseKeywordLines(raw?: string): string[] {
+   if (!raw) return []
+ 
+@@ -9,7 +42,7 @@ export function parseKeywordLines(raw?: string): string[] {
+       const parsed = JSON.parse(text)
+       if (Array.isArray(parsed)) {
+         return parsed
+-          .map((value) => String(value ?? '').trim())
++          .map(normalizeKeyword)
+           .filter(Boolean)
+       }
+     } catch {
+@@ -23,7 +56,7 @@ export function parseKeywordLines(raw?: string): string[] {
+ 
+   return body
+     .split(/[\r\n,，]+/)
+-    .map((value) => value.trim().replace(/^"|"$/g, ''))
++    .map((value) => normalizeKeyword(value.replace(/^"|"$/g, '')))
+     .filter(Boolean)
+ }
+ 
+diff --git a/src/main/java/com/getjobs/application/service/LiepinService.java b/src/main/java/com/getjobs/application/service/LiepinService.java
+index ac53d69..2f0d2d5 100644
+--- a/src/main/java/com/getjobs/application/service/LiepinService.java
++++ b/src/main/java/com/getjobs/application/service/LiepinService.java
+@@ -8,6 +8,7 @@ import com.getjobs.application.mapper.LiepinConfigMapper;
+ import com.getjobs.application.mapper.LiepinOptionMapper;
+ import com.getjobs.application.mapper.LiepinMapper;
+ import com.getjobs.worker.liepin.LiepinConfig;
++import com.getjobs.worker.utils.KeywordParser;
+ import lombok.RequiredArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.stereotype.Service;
+@@ -755,6 +756,7 @@ public class LiepinService {
+      * 更新配置
+      */
+     public LiepinConfigEntity updateConfig(LiepinConfigEntity config) {
++        normalizeKeywordsForStorage(config);
+         applyDeliveryDefaults(config);
+         config.setUpdatedAt(LocalDateTime.now());
+         liepinConfigMapper.updateById(config);
+@@ -766,6 +768,7 @@ public class LiepinService {
+      * 如果数据库中没有记录，则插入新记录；否则更新第一条记录
+      */
+     public LiepinConfigEntity saveOrUpdateFirstSelective(LiepinConfigEntity config) {
++        normalizeKeywordsForStorage(config);
+         LiepinConfigEntity existing = getFirstConfig();
+         if (existing == null) {
+             // 不存在记录，插入新配置
+@@ -846,6 +849,12 @@ public class LiepinService {
+         return existing;
+     }
+ 
++    private void normalizeKeywordsForStorage(LiepinConfigEntity config) {
++        if (config != null && config.getKeywords() != null) {
++            config.setKeywords(KeywordParser.toStorage(config.getKeywords()));
++        }
++    }
++
+     private void applyDeliveryDefaults(LiepinConfigEntity config) {
+         if (config == null) return;
+         if (config.getEnableAi() == null) config.setEnableAi(1);
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinPageProgress.java b/src/main/java/com/getjobs/worker/liepin/LiepinPageProgress.java
+index b3c9d6d..104a3e4 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinPageProgress.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinPageProgress.java
+@@ -1,11 +1,13 @@
+ package com.getjobs.worker.liepin;
+ 
++import com.getjobs.worker.utils.KeywordParser;
++
+ public final class LiepinPageProgress {
+     private LiepinPageProgress() {
+     }
+ 
+     public static String normalize(String value) {
+-        return value == null ? "" : value.trim();
++        return KeywordParser.repairUtf8Mojibake(value == null ? "" : value).trim();
+     }
+ 
+     public static int nextStartPage(Integer lastCompletedPage) {
+diff --git a/src/main/java/com/getjobs/worker/utils/KeywordParser.java b/src/main/java/com/getjobs/worker/utils/KeywordParser.java
+index 242a4ae..1430e1c 100644
+--- a/src/main/java/com/getjobs/worker/utils/KeywordParser.java
++++ b/src/main/java/com/getjobs/worker/utils/KeywordParser.java
+@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.List;
++import java.nio.charset.StandardCharsets;
+ import java.util.stream.Collectors;
+ 
+ /** Parses keyword input from the UI and legacy stored formats. */
+@@ -25,7 +26,7 @@ public final class KeywordParser {
+                 if (node.isArray()) {
+                     List<String> values = new ArrayList<>();
+                     node.forEach(item -> {
+-                        String value = item.asText("").trim();
++                        String value = repairUtf8Mojibake(item.asText("").trim());
+                         if (!value.isEmpty()) values.add(value);
+                     });
+                     return values;
+@@ -39,10 +40,45 @@ public final class KeywordParser {
+         return Arrays.stream(text.split("[,\\r\\n]+"))
+                 .map(String::trim)
+                 .map(KeywordParser::stripWrapperQuotes)
++                .map(KeywordParser::repairUtf8Mojibake)
+                 .filter(value -> !value.isEmpty())
+                 .collect(Collectors.toList());
+     }
+ 
++    /** Restores legacy text that was repeatedly decoded as Latin-1 instead of UTF-8. */
++    public static String repairUtf8Mojibake(String value) {
++        if (value == null || value.isEmpty()) return value;
++
++        String current = value;
++        for (int round = 0; round < 3; round++) {
++            if (!isLatin1(current)) break;
++            byte[] bytes = new byte[current.length()];
++            for (int index = 0; index < current.length(); index++) {
++                bytes[index] = (byte) current.charAt(index);
++            }
++            String candidate = new String(bytes, StandardCharsets.UTF_8);
++            if (candidate.indexOf('\uFFFD') >= 0 || candidate.equals(current)) break;
++            current = candidate;
++        }
++        return current;
++    }
++
++    /** Serializes parsed keywords so the next configuration save removes legacy corruption. */
++    public static String toStorage(String raw) {
++        try {
++            return MAPPER.writeValueAsString(parse(raw));
++        } catch (Exception ignored) {
++            return "[]";
++        }
++    }
++
++    private static boolean isLatin1(String value) {
++        for (int index = 0; index < value.length(); index++) {
++            if (value.charAt(index) > 0xFF) return false;
++        }
++        return true;
++    }
++
+     private static String stripWrapperQuotes(String value) {
+         if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+             return value.substring(1, value.length() - 1).trim();
+diff --git a/src/test/java/com/getjobs/application/service/LiepinServiceKeywordNormalizationTest.java b/src/test/java/com/getjobs/application/service/LiepinServiceKeywordNormalizationTest.java
+new file mode 100644
+index 0000000..c0137fc
+--- /dev/null
++++ b/src/test/java/com/getjobs/application/service/LiepinServiceKeywordNormalizationTest.java
+@@ -0,0 +1,38 @@
++package com.getjobs.application.service;
++
++import com.getjobs.application.entity.LiepinConfigEntity;
++import com.getjobs.application.mapper.LiepinConfigMapper;
++import com.getjobs.application.mapper.LiepinMapper;
++import com.getjobs.application.mapper.LiepinOptionMapper;
++import org.junit.jupiter.api.Test;
++
++import javax.sql.DataSource;
++import java.nio.charset.StandardCharsets;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.Mockito.mock;
++
++class LiepinServiceKeywordNormalizationTest {
++
++    @Test
++    void updateConfigStoresRepairedKeywordsAsJson() {
++        LiepinService service = new LiepinService(
++                mock(LiepinConfigMapper.class),
++                mock(LiepinOptionMapper.class),
++                mock(LiepinMapper.class),
++                mock(DataSource.class)
++        );
++        LiepinConfigEntity config = new LiepinConfigEntity();
++        config.setId(1L);
++        config.setKeywords(doubleMojibake("放射技师"));
++
++        service.updateConfig(config);
++
++        assertEquals("[\"放射技师\"]", config.getKeywords());
++    }
++
++    private static String doubleMojibake(String value) {
++        String once = new String(value.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
++        return new String(once.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
++    }
++}
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinPageProgressTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinPageProgressTest.java
+index 8f1d30b..e87f569 100644
+--- a/src/test/java/com/getjobs/worker/liepin/LiepinPageProgressTest.java
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinPageProgressTest.java
+@@ -2,6 +2,8 @@ package com.getjobs.worker.liepin;
+ 
+ import org.junit.jupiter.api.Test;
+ 
++import java.nio.charset.StandardCharsets;
++
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertFalse;
+ import static org.junit.jupiter.api.Assertions.assertTrue;
+@@ -41,4 +43,12 @@ class LiepinPageProgressTest {
+         assertEquals("放疗物理师", LiepinPageProgress.normalize(" 放疗物理师 "));
+     }
+ 
++    @Test
++    void normalize_repairsRepeatedUtf8Mojibake() {
++        String value = "放射技师";
++        String once = new String(value.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
++        String twice = new String(once.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
++
++        assertEquals(value, LiepinPageProgress.normalize(twice));
++    }
+ }
+diff --git a/src/test/java/com/getjobs/worker/utils/KeywordParserTest.java b/src/test/java/com/getjobs/worker/utils/KeywordParserTest.java
+index 65cfcd4..649a124 100644
+--- a/src/test/java/com/getjobs/worker/utils/KeywordParserTest.java
++++ b/src/test/java/com/getjobs/worker/utils/KeywordParserTest.java
+@@ -2,6 +2,7 @@ package com.getjobs.worker.utils;
+ 
+ import org.junit.jupiter.api.Test;
+ 
++import java.nio.charset.StandardCharsets;
+ import java.util.List;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+@@ -28,4 +29,22 @@ class KeywordParserTest {
+         assertEquals(List.of("Java", "后端", "Spring"), KeywordParser.parse("[Java，后端, Spring]"));
+     }
+ 
++    @Test
++    void repairsRepeatedUtf8MojibakeInLegacyLines() {
++        String raw = doubleMojibake("放射技师") + "\n" + doubleMojibake("医疗设备售后");
++
++        assertEquals(List.of("放射技师", "医疗设备售后"), KeywordParser.parse(raw));
++        assertEquals("[\"放射技师\",\"医疗设备售后\"]", KeywordParser.toStorage(raw));
++    }
++
++    @Test
++    void leavesCanonicalTextUntouched() {
++        assertEquals("放射技师", KeywordParser.repairUtf8Mojibake("放射技师"));
++        assertEquals("plain", KeywordParser.repairUtf8Mojibake("plain"));
++    }
++
++    private static String doubleMojibake(String value) {
++        String once = new String(value.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
++        return new String(once.getBytes(StandardCharsets.UTF_8), StandardCharsets.ISO_8859_1);
++    }
+ }
+diff --git a/进度白板.md b/进度白板.md
+index fe9e1c4..887d14d 100644
+--- a/进度白板.md
++++ b/进度白板.md
+@@ -269,3 +269,10 @@
+ 🔨 正在做：无 —— 代码、定向/全量测试和本轮实际投递均已完成。
+ ⬜ 还没做：后台模式重新导入完整 APP Cookie 后的登录检测复测；当前后台接口仍返回 `needsReimport=true`，后续新任务前需在 visible-login 完成登录捕获。
+ ❓ 需要你决定：无。
++
++✅ 已完成：APP 搜索关键词乱码修复 —— 配置页和断点列表读取历史重复转码关键词时显示正常，后端搜索解析同步还原。
++✅ 已完成：APP 关键词保存规范化 —— 保存接口将修复后的关键词统一写为 JSON，现有数据库原值保留到下一次保存。
++✅ 已完成：乱码回归验证 —— Java 定向/全量测试、前端 lint/build、diff 检查和真实页面回读均通过，截图证据已保存。
++🔨 正在做：无 —— 本轮源码、测试和 CodeStable 记录已完成。
++⬜ 还没做：无。
++❓ 需要你决定：是否按快照对本轮明确路径创建本地 scoped commit；push 保持关闭。

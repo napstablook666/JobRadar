@@ -1,0 +1,848 @@
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index b761e85..ece639d 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -5,6 +5,9 @@ import com.getjobs.application.entity.AiEntity;
+ import com.getjobs.application.service.LiepinService;
+ import com.getjobs.application.service.AiService;
+ import com.getjobs.application.entity.LiepinEntity;
++import com.getjobs.worker.manager.BrowserSessionSnapshot;
++import com.getjobs.worker.manager.PlaywrightManager;
++import com.getjobs.worker.manager.ReadRequestStatus;
+ import com.fasterxml.jackson.databind.JsonNode;
+ import com.fasterxml.jackson.databind.ObjectMapper;
+ import com.microsoft.playwright.Locator;
+@@ -96,6 +99,12 @@ public class Liepin {
+     private LiepinService liepinService;
+     @Autowired
+     private AiService aiService;
++    @Autowired
++    private PlaywrightManager playwrightManager;
++    @Autowired
++    private LiepinHttpSearchClient liepinHttpSearchClient;
++    private volatile ReadRequestStatus readRequestStatus =
++            ReadRequestStatus.browser(false, "尚未读取猎聘搜索");
+ 
+     public interface ProgressCallback {
+         void onProgress(String message, Integer current, Integer total);
+@@ -258,6 +267,7 @@ public class Liepin {
+         skipReasons.clear();
+         lastAiRequestTimedOut = false;
+         pendingAiRetryJobs = 0;
++        readRequestStatus = ReadRequestStatus.browser(false, "尚未读取猎聘搜索");
+         if (rateGuard == null || pendingRetryJobIds == null) {
+             this.rateGuard = LiepinRateGuard.production(
+                     this::shouldStop,
+@@ -393,6 +403,10 @@ public class Liepin {
+         return summary;
+     }
+ 
++    public ReadRequestStatus getReadRequestStatus() {
++        return readRequestStatus;
++    }
++
+     private String completionDetail() {
+         if (skipReasons.isEmpty()) {
+             return "未记录可跳过原因";
+@@ -797,6 +811,7 @@ public class Liepin {
+             if (!parseSearchResponse(response)) {
+                 throw new IllegalStateException("猎聘自定义薪资确认后的搜索响应未解析到岗位数据结构");
+             }
++            readRequestStatus = ReadRequestStatus.browser(false, "自定义薪资确认后的浏览器搜索");
+             rateGuard.completed(LiepinRateGuard.Action.SEARCH);
+         } catch (RateLimitSignalException signal) {
+             throw signal;
+@@ -994,12 +1009,45 @@ public class Liepin {
+     }
+ 
+     /**
+-     * 搜索导航必须把动作和响应等待放在同一个 Playwright 调用中，避免异步 response 回调跨线程读取正文。
+-     * 导航最多重试一次；聊天点击不走这条重试路径，避免重复发起投递。
++     * hybrid 模式先用 HTTP 读取岗位 JSON，再用页面完成 DOM 加载和投递动作。
++     * HTTP 读取失败时回到原有 Playwright 响应捕获链路。
+      */
+     private boolean navigateAndCaptureSearchResponse(String searchUrl) {
+         lastApiEntities.clear();
+         if (!rateGuard.before(LiepinRateGuard.Action.SEARCH)) return false;
++
++        boolean httpAttempted = false;
++        String httpFailureDetail = "";
++        if (playwrightManager != null
++                && liepinHttpSearchClient != null
++                && playwrightManager.isHybridTransport()) {
++            httpAttempted = true;
++            LiepinHttpSearchClient.SearchResult httpResult = requestSearchOverHttp(searchUrl);
++            if (httpResult != null && httpResult.success() && parseAndPersistLiepinData(httpResult.body())) {
++                try {
++                    page.navigate(searchUrl);
++                    rateGuard.completed(LiepinRateGuard.Action.SEARCH);
++                    readRequestStatus = ReadRequestStatus.http("猎聘搜索HTTP读取成功");
++                    return true;
++                } catch (RuntimeException e) {
++                    if (isTargetClosedFailure(e)) {
++                        throw pageClosed(e, false);
++                    }
++                    httpFailureDetail = "HTTP读取成功但页面加载失败: " + messageOf(e);
++                    log.warn("猎聘HTTP搜索结果已解析，但页面加载失败，回退浏览器响应链路: {}",
++                            e.getMessage());
++                }
++            } else if (httpResult != null && httpResult.success()) {
++                httpFailureDetail = "HTTP搜索响应未解析到岗位数据结构";
++                log.warn("猎聘HTTP搜索响应结构异常，回退浏览器响应链路");
++            } else {
++                httpFailureDetail = httpResult == null
++                        ? "HTTP搜索客户端未返回结果"
++                        : httpResult.detail();
++                log.warn("猎聘HTTP搜索失败，回退浏览器响应链路: {}", httpFailureDetail);
++            }
++        }
++
+         RuntimeException lastFailure = null;
+         for (int attempt = 1; attempt <= 2; attempt++) {
+             try {
+@@ -1008,7 +1056,13 @@ public class Liepin {
+                         () -> page.navigate(searchUrl)
+                 );
+                 validateSearchResponse(response);
+-                parseSearchResponse(response);
++                if (!parseSearchResponse(response)) {
++                    throw new IllegalStateException("猎聘浏览器搜索响应未解析到岗位数据结构");
++                }
++                readRequestStatus = ReadRequestStatus.browser(httpAttempted,
++                        httpAttempted && !httpFailureDetail.isBlank()
++                                ? httpFailureDetail
++                                : "猎聘浏览器搜索响应读取成功");
+                 rateGuard.completed(LiepinRateGuard.Action.SEARCH);
+                 return true;
+             } catch (RateLimitSignalException signal) {
+@@ -1029,6 +1083,37 @@ public class Liepin {
+                 : lastFailure;
+     }
+ 
++    private LiepinHttpSearchClient.SearchResult requestSearchOverHttp(String searchUrl) {
++        String keyword = queryParameter(searchUrl, "key");
++        int currentPage = parsePageParameter(queryParameter(searchUrl, "currentPage"));
++        String cityCode = config == null ? "" : config.getCityCode();
++        BrowserSessionSnapshot snapshot = playwrightManager.getSessionSnapshot();
++        return liepinHttpSearchClient.search(keyword, cityCode, currentPage, snapshot);
++    }
++
++    private int parsePageParameter(String raw) {
++        try {
++            return Math.max(0, Integer.parseInt(raw));
++        } catch (Exception ignored) {
++            return 0;
++        }
++    }
++
++    private String queryParameter(String url, String name) {
++        if (url == null || name == null) return "";
++        String marker = name + "=";
++        int start = url.indexOf(marker);
++        if (start < 0) return "";
++        start += marker.length();
++        int end = url.indexOf('&', start);
++        String raw = end < 0 ? url.substring(start) : url.substring(start, end);
++        try {
++            return java.net.URLDecoder.decode(raw, StandardCharsets.UTF_8);
++        } catch (Exception ignored) {
++            return raw;
++        }
++    }
++
+     private boolean clickNextPageAndCaptureResponse(Locator nextButton) {
+         if (!rateGuard.before(LiepinRateGuard.Action.PAGE)) return false;
+         try {
+@@ -1037,7 +1122,10 @@ public class Liepin {
+                     nextButton::click
+             );
+             validateSearchResponse(response);
+-            parseSearchResponse(response);
++            if (!parseSearchResponse(response)) {
++                throw new IllegalStateException("猎聘下一页搜索响应未解析到岗位数据结构");
++            }
++            readRequestStatus = ReadRequestStatus.browser(false, "猎聘下一页浏览器搜索响应");
+             rateGuard.completed(LiepinRateGuard.Action.PAGE);
+             return true;
+         } catch (RateLimitSignalException signal) {
+@@ -1110,6 +1198,13 @@ public class Liepin {
+         }
+     }
+ 
++    private String messageOf(Throwable error) {
++        String message = error == null ? null : error.getMessage();
++        return message == null || message.isBlank()
++                ? error == null ? "未知错误" : error.getClass().getSimpleName()
++                : message;
++    }
++
+     static String detectRiskSignal(String text) {
+         if (text == null || text.isBlank()) return null;
+         String normalized = text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+diff --git a/src/main/java/com/getjobs/worker/service/LiepinJobService.java b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+index 1f704ae..e9c8ff6 100644
+--- a/src/main/java/com/getjobs/worker/service/LiepinJobService.java
++++ b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+@@ -6,6 +6,7 @@ import com.getjobs.worker.dto.JobProgressMessage;
+ import com.getjobs.worker.liepin.Liepin;
+ import com.getjobs.worker.liepin.LiepinConfig;
+ import com.getjobs.worker.manager.PlaywrightManager;
++import com.getjobs.worker.manager.ReadRequestStatus;
+ import com.microsoft.playwright.Page;
+ import jakarta.annotation.PreDestroy;
+ import lombok.RequiredArgsConstructor;
+@@ -73,6 +74,8 @@ public class LiepinJobService implements JobPlatformService {
+     private volatile int lastDeliveredCount = 0;
+     private volatile long runId = 0L;
+     private volatile Map<String, Object> deliverySummary = emptyDeliverySummary();
++    private volatile ReadRequestStatus lastReadRequestStatus =
++            ReadRequestStatus.browser(false, "尚未读取猎聘搜索");
+ 
+     // 停止请求标志
+     private volatile boolean shouldStop = false;
+@@ -325,6 +328,7 @@ public class LiepinJobService implements JobPlatformService {
+         activeProgressCallback = progressCallback;
+         aiSummary = emptyAiSummary();
+         deliverySummary = emptyDeliverySummary();
++        lastReadRequestStatus = ReadRequestStatus.browser(false, "尚未读取猎聘搜索");
+         lastDeliveredCount = 0;
+         retryMode = mode;
+         pendingRetryJobIds = mode == RetryMode.SUSPENDED_BATCH
+@@ -608,6 +612,10 @@ public class LiepinJobService implements JobPlatformService {
+         try {
+             aiSummary = liepin.getAiSummary();
+             deliverySummary = liepin.getDeliverySummary();
++            ReadRequestStatus currentReadRequestStatus = liepin.getReadRequestStatus();
++            if (currentReadRequestStatus != null) {
++                lastReadRequestStatus = currentReadRequestStatus;
++            }
+         } catch (RuntimeException e) {
+             log.warn("读取猎聘运行统计失败: {}", e.getMessage());
+         }
+@@ -712,6 +720,7 @@ public class LiepinJobService implements JobPlatformService {
+         status.put("recentMessages", recentMessages);
+         status.put("aiSummary", aiSummary);
+         status.put("deliverySummary", deliverySummary);
++        status.put("readRequest", lastReadRequestStatus.asMap());
+         Liepin.GreetingRequest pending = pendingGreeting;
+         if (pending != null) {
+             Map<String, Object> pendingData = new HashMap<>();
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51.java b/src/main/java/com/getjobs/worker/job51/Job51.java
+index cf88d6d..4dd791b 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51.java
+@@ -6,6 +6,7 @@ import com.getjobs.application.entity.AiEntity;
+ import com.getjobs.application.entity.Job51Entity;
+ import com.getjobs.worker.utils.JobUtils;
+ import com.getjobs.worker.utils.PlaywrightUtil;
++import com.getjobs.worker.manager.ReadRequestStatus;
+ import com.microsoft.playwright.Locator;
+ import com.microsoft.playwright.Page;
+ import com.microsoft.playwright.Response;
+@@ -78,6 +79,9 @@ public class Job51 {
+     private int greetingSkippedCount;
+     @Getter
+     private int greetingFailedCount;
++    @Getter
++    private volatile ReadRequestStatus readRequestStatus =
++            ReadRequestStatus.browser(false, "尚未读取51job搜索");
+     // 当前页从JSON拦截到的jobId列表
+     private final java.util.List<Long> currentPageJobIds = new java.util.ArrayList<>();
+ 
+@@ -109,6 +113,7 @@ public class Job51 {
+         greetingSentCount = 0;
+         greetingSkippedCount = 0;
+         greetingFailedCount = 0;
++        readRequestStatus = ReadRequestStatus.browser(false, "尚未读取51job搜索");
+         currentPageNum = 0;
+         reachedDailyLimit = false;
+         synchronized (currentPageJobIds) {
+@@ -344,16 +349,21 @@ public class Job51 {
+             } catch (Throwable ignored) {
+             }
+             if (status < 200 || status >= 300) {
++                readRequestStatus = ReadRequestStatus.browser(false,
++                        "51job浏览器搜索响应状态异常: " + status);
+                 log.warn("[51job] 搜索接口响应异常 status={}, bodyLength={}", status,
+                         text == null ? 0 : text.length());
+                 return;
+             }
+             if (text == null || text.isBlank()) {
++                readRequestStatus = ReadRequestStatus.browser(false, "51job浏览器搜索响应为空");
+                 log.warn("[51job] 搜索接口响应为空 status={}", status);
+                 return;
+             }
+ 
+             if (!looksLikeJson(text, response.headers())) {
++                readRequestStatus = ReadRequestStatus.browser(false,
++                        "51job浏览器搜索响应不是可解析JSON");
+                 log.warn("[51job] 搜索接口响应不是可解析 JSON，contentType={}, bodyLength={}",
+                         response.headers().get("content-type"), text.length());
+                 return;
+@@ -386,8 +396,11 @@ public class Job51 {
+             }
+             log.info("[51job] 搜索快照解析完成 jobIds={}, bodyLength={}",
+                     jobIds.size(), text.length());
++            readRequestStatus = ReadRequestStatus.browser(false, "51job浏览器搜索响应读取成功");
+             if (requestId != null && !requestId.isBlank()) processedRequestIds.add(requestId);
+         } catch (Throwable e) {
++            readRequestStatus = ReadRequestStatus.browser(false,
++                    "51job浏览器搜索响应解析失败: " + messageOf(e, "未知错误"));
+             log.debug("51job搜索响应解析失败: {}", e.getMessage());
+         }
+     }
+diff --git a/src/main/java/com/getjobs/worker/service/Job51JobService.java b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+index 7140518..271cf0b 100644
+--- a/src/main/java/com/getjobs/worker/service/Job51JobService.java
++++ b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+@@ -5,6 +5,7 @@ import com.getjobs.worker.dto.JobProgressMessage;
+ import com.getjobs.worker.job51.Job51;
+ import com.getjobs.worker.job51.Job51Config;
+ import com.getjobs.worker.manager.PlaywrightManager;
++import com.getjobs.worker.manager.ReadRequestStatus;
+ import com.microsoft.playwright.Page;
+ import lombok.RequiredArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+@@ -56,6 +57,8 @@ public class Job51JobService implements JobPlatformService {
+     private volatile int lastGreetingSkippedCount;
+     private volatile int lastGreetingFailedCount;
+     private volatile int lastAiProcessedCount;
++    private volatile ReadRequestStatus lastReadRequestStatus =
++            ReadRequestStatus.browser(false, "尚未读取51job搜索");
+     private volatile Consumer<JobProgressMessage> activeProgressCallback;
+     private volatile String lastMessage = "尚未启动投递任务";
+     private volatile String lastMessageType = "idle";
+@@ -123,6 +126,7 @@ public class Job51JobService implements JobPlatformService {
+         lastGreetingSkippedCount = 0;
+         lastGreetingFailedCount = 0;
+         lastAiProcessedCount = 0;
++        lastReadRequestStatus = ReadRequestStatus.browser(false, "尚未读取51job搜索");
+         recentStatus.clear();
+         publish(progressCallback, JobProgressMessage.info(PLATFORM, "正在初始化投递任务..."));
+         return true;
+@@ -212,6 +216,10 @@ public class Job51JobService implements JobPlatformService {
+             lastGreetingSkippedCount = job51.getGreetingSkippedCount();
+             lastGreetingFailedCount = job51.getGreetingFailedCount();
+             lastAiProcessedCount = job51.getAiProcessedCount();
++            ReadRequestStatus currentReadRequestStatus = job51.getReadRequestStatus();
++            if (currentReadRequestStatus != null) {
++                lastReadRequestStatus = currentReadRequestStatus;
++            }
+ 
+             if (job51.getExecutionError() != null) {
+                 taskState = TaskState.FAILED;
+@@ -275,6 +283,9 @@ public class Job51JobService implements JobPlatformService {
+         status.put("greetingSentCount", current == null ? lastGreetingSentCount : current.getGreetingSentCount());
+         status.put("greetingSkippedCount", current == null ? lastGreetingSkippedCount : current.getGreetingSkippedCount());
+         status.put("greetingFailedCount", current == null ? lastGreetingFailedCount : current.getGreetingFailedCount());
++        status.put("readRequest", current == null
++                ? lastReadRequestStatus.asMap()
++                : current.getReadRequestStatus().asMap());
+         status.put("message", lastMessage);
+         status.put("messageType", lastMessageType);
+         status.put("messageAt", lastMessageAt);
+diff --git a/src/main/resources/application.yaml b/src/main/resources/application.yaml
+index 676d9d0..f9dcdd7 100644
+--- a/src/main/resources/application.yaml
++++ b/src/main/resources/application.yaml
+@@ -40,6 +40,10 @@ getjobs:
+     page-policy: ${GETJOBS_BROWSER_PAGE_POLICY:lazy}
+     # 可选：Chromium headless-shell 可执行文件；为空时使用 Playwright 捆绑 Chromium
+     headless-shell-path: ${GETJOBS_HEADLESS_SHELL:}
++  liepin:
++    # 搜索 JSON 端点可替换为本地 HttpServer，便于回归测试和故障演练
++    search-endpoint: ${GETJOBS_LIEPIN_SEARCH_ENDPOINT:https://api-c.liepin.com/api/com.liepin.searchfront4c.pc-search-job}
++    search-timeout-ms: ${GETJOBS_LIEPIN_SEARCH_TIMEOUT_MS:10000}
+ 
+ # 日志配置
+ logging:
+diff --git a/src/test/java/com/getjobs/worker/manager/PlaywrightManagerModeTest.java b/src/test/java/com/getjobs/worker/manager/PlaywrightManagerModeTest.java
+index 8ef2457..da3645b 100644
+--- a/src/test/java/com/getjobs/worker/manager/PlaywrightManagerModeTest.java
++++ b/src/test/java/com/getjobs/worker/manager/PlaywrightManagerModeTest.java
+@@ -48,4 +48,19 @@ class PlaywrightManagerModeTest {
+         org.junit.jupiter.api.Assertions.assertFalse(args.contains("--headless=new"));
+     }
+ 
++    @Test
++    void normalizesBrowserRuntimeChoices() {
++        assertEquals(BrowserRuntimeConfig.TransportMode.HYBRID,
++                BrowserRuntimeConfig.normalizeTransport(null));
++        assertEquals(BrowserRuntimeConfig.TransportMode.BROWSER,
++                BrowserRuntimeConfig.normalizeTransport("browser"));
++        assertEquals(BrowserRuntimeConfig.Engine.SYSTEM_CDP,
++                BrowserRuntimeConfig.normalizeEngine("chrome"));
++        assertEquals(BrowserRuntimeConfig.Engine.HEADLESS_SHELL,
++                BrowserRuntimeConfig.normalizeEngine("shell"));
++        assertEquals(BrowserRuntimeConfig.PagePolicy.LAZY,
++                BrowserRuntimeConfig.normalizePagePolicy("unexpected"));
++        assertEquals(BrowserRuntimeConfig.PagePolicy.EAGER,
++                BrowserRuntimeConfig.normalizePagePolicy("eager"));
++    }
+ }
+diff --git a/src/main/java/com/getjobs/worker/manager/ReadRequestStatus.java b/src/main/java/com/getjobs/worker/manager/ReadRequestStatus.java
+new file mode 100644
+index 0000000..b813d75
+--- /dev/null
++++ b/src/main/java/com/getjobs/worker/manager/ReadRequestStatus.java
+@@ -0,0 +1,31 @@
++package com.getjobs.worker.manager;
++
++import java.util.LinkedHashMap;
++import java.util.Locale;
++import java.util.Map;
++
++/** Common observable state for platform read paths and browser fallbacks. */
++public record ReadRequestStatus(String route, boolean fallback, String detail) {
++    public ReadRequestStatus {
++        route = route == null || route.isBlank()
++                ? "browser"
++                : route.trim().toLowerCase(Locale.ROOT);
++        detail = detail == null || detail.isBlank() ? "" : detail.trim();
++    }
++
++    public static ReadRequestStatus http(String detail) {
++        return new ReadRequestStatus("http", false, detail);
++    }
++
++    public static ReadRequestStatus browser(boolean fallback, String detail) {
++        return new ReadRequestStatus("browser", fallback, detail);
++    }
++
++    public Map<String, Object> asMap() {
++        Map<String, Object> result = new LinkedHashMap<>();
++        result.put("route", route);
++        result.put("fallback", fallback);
++        result.put("detail", detail);
++        return result;
++    }
++}
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java b/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
+new file mode 100644
+index 0000000..5188316
+--- /dev/null
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
+@@ -0,0 +1,258 @@
++package com.getjobs.worker.liepin;
++
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.getjobs.worker.manager.BrowserSessionSnapshot;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.stereotype.Component;
++
++import java.io.IOException;
++import java.net.URI;
++import java.net.URLEncoder;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpResponse;
++import java.nio.charset.StandardCharsets;
++import java.time.Duration;
++import java.util.LinkedHashMap;
++import java.util.Map;
++import java.util.UUID;
++
++/** Direct read client for the Liepin search JSON endpoint. */
++@Component
++public class LiepinHttpSearchClient {
++    public static final String DEFAULT_ENDPOINT =
++            "https://api-c.liepin.com/api/com.liepin.searchfront4c.pc-search-job";
++    private static final String SEARCH_REFERER = "https://www.liepin.com/zhaopin/";
++    private static final String USER_AGENT =
++            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
++                    + "(KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
++    private static final int DEFAULT_TIMEOUT_MS = 10_000;
++
++    private final HttpClient httpClient;
++    private final URI endpoint;
++    private final Duration requestTimeout;
++    private final ObjectMapper objectMapper;
++
++    public enum FailureKind {
++        NONE,
++        HTTP_STATUS,
++        EMPTY_BODY,
++        RISK_SIGNAL,
++        INVALID_JSON,
++        TRANSPORT
++    }
++
++    public record SearchResult(
++            boolean success,
++            int statusCode,
++            String body,
++            FailureKind failureKind,
++            String detail
++    ) {
++        public static SearchResult success(int statusCode, String body) {
++            return new SearchResult(true, statusCode, body, FailureKind.NONE, "");
++        }
++
++        public static SearchResult failure(int statusCode, FailureKind kind, String detail) {
++            return new SearchResult(false, statusCode, "", kind, detail);
++        }
++    }
++
++    @Autowired
++    public LiepinHttpSearchClient(
++            @Value("${getjobs.liepin.search-endpoint:" + DEFAULT_ENDPOINT + "}") String endpoint,
++            @Value("${getjobs.liepin.search-timeout-ms:" + DEFAULT_TIMEOUT_MS + "}") int timeoutMs
++    ) {
++        this(HttpClient.newBuilder()
++                        .connectTimeout(Duration.ofSeconds(5))
++                        .followRedirects(HttpClient.Redirect.NORMAL)
++                        .build(),
++                URI.create(normalizeEndpoint(endpoint)),
++                Duration.ofMillis(Math.max(1, timeoutMs)),
++                new ObjectMapper());
++    }
++
++    public LiepinHttpSearchClient(HttpClient httpClient, URI endpoint, Duration requestTimeout) {
++        this(httpClient, endpoint, requestTimeout, new ObjectMapper());
++    }
++
++    LiepinHttpSearchClient(HttpClient httpClient, URI endpoint, Duration requestTimeout, ObjectMapper objectMapper) {
++        if (httpClient == null) throw new IllegalArgumentException("HttpClient 不能为空");
++        if (endpoint == null) throw new IllegalArgumentException("猎聘搜索端点不能为空");
++        if (requestTimeout == null || requestTimeout.isNegative() || requestTimeout.isZero()) {
++            throw new IllegalArgumentException("猎聘搜索请求超时必须大于0");
++        }
++        this.httpClient = httpClient;
++        this.endpoint = endpoint;
++        this.requestTimeout = requestTimeout;
++        this.objectMapper = objectMapper == null ? new ObjectMapper() : objectMapper;
++    }
++
++    public SearchResult search(
++            String keyword,
++            String cityCode,
++            int zeroBasedPage,
++            BrowserSessionSnapshot session
++    ) {
++        try {
++            HttpRequest request = buildRequest(keyword, cityCode, zeroBasedPage, session);
++            HttpResponse<String> response = httpClient.send(
++                    request,
++                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
++            int status = response.statusCode();
++            String body = response.body();
++            if (status < 200 || status >= 300) {
++                return SearchResult.failure(status, FailureKind.HTTP_STATUS,
++                        "HTTP搜索响应状态异常: " + status);
++            }
++            if (body == null || body.isBlank()) {
++                return SearchResult.failure(status, FailureKind.EMPTY_BODY, "HTTP搜索响应正文为空");
++            }
++            String signal = Liepin.detectRiskSignal(body);
++            if (signal != null) {
++                return SearchResult.failure(status, FailureKind.RISK_SIGNAL,
++                        "HTTP搜索响应出现风控信号: " + signal);
++            }
++            if (!looksLikeJson(body)) {
++                return SearchResult.failure(status, FailureKind.INVALID_JSON,
++                        "HTTP搜索响应不是有效JSON");
++            }
++            return SearchResult.success(status, body);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++            return SearchResult.failure(0, FailureKind.TRANSPORT, "HTTP搜索请求被中断");
++        } catch (IOException | RuntimeException e) {
++            return SearchResult.failure(0, FailureKind.TRANSPORT,
++                    "HTTP搜索请求失败: " + messageOf(e));
++        }
++    }
++
++    HttpRequest buildRequest(
++            String keyword,
++            String cityCode,
++            int zeroBasedPage,
++            BrowserSessionSnapshot session
++    ) {
++        String normalizedKeyword = keyword == null ? "" : keyword.trim();
++        String normalizedCity = cityCode == null ? "" : cityCode.trim();
++        String referer = SEARCH_REFERER + "?city="
++                + encode(normalizedCity) + "&currentPage=" + Math.max(0, zeroBasedPage)
++                + "&key=" + encode(normalizedKeyword);
++        String cookieHeader = session == null ? "" : session.cookieHeader("liepin.com");
++        String xsrf = firstNonBlank(
++                session == null ? null : session.value("XSRF-TOKEN"),
++                session == null ? null : session.value("xsrf-token"));
++        String sessionId = firstNonBlank(
++                session == null ? null : session.value("ckId"),
++                session == null ? null : session.value("ckid"),
++                runtimeId());
++
++        HttpRequest.Builder request = HttpRequest.newBuilder(endpoint)
++                .timeout(requestTimeout)
++                .header("Accept", "application/json, text/plain, */*")
++                .header("Content-Type", "application/json;charset=UTF-8")
++                .header("User-Agent", USER_AGENT)
++                .header("Accept-Language", "zh-CN,zh;q=0.9")
++                .header("Origin", "https://www.liepin.com")
++                .header("Referer", referer)
++                .header("X-Requested-With", "XMLHttpRequest")
++                .header("Sec-Fetch-Dest", "empty")
++                .header("Sec-Fetch-Mode", "cors")
++                .header("Sec-Fetch-Site", "same-site")
++                .header("X-Fscp-Trace-Id", runtimeId())
++                .header("X-Fscp-Std-Info", "{\"client\":\"pc\",\"source\":\"web\"}")
++                .header("X-Fscp-Token", "")
++                .POST(HttpRequest.BodyPublishers.ofString(
++                        buildRequestBody(normalizedKeyword, normalizedCity, zeroBasedPage, sessionId),
++                        StandardCharsets.UTF_8));
++        if (!cookieHeader.isBlank()) {
++            request.header("Cookie", cookieHeader);
++        }
++        if (xsrf != null && !xsrf.isBlank()) {
++            request.header("X-XSRF-TOKEN", xsrf);
++        }
++        return request.build();
++    }
++
++    String buildRequestBody(String keyword, String cityCode, int zeroBasedPage, String sessionId) {
++        Map<String, Object> main = new LinkedHashMap<>();
++        main.put("city", cityCode == null ? "" : cityCode);
++        main.put("dq", cityCode == null ? "" : cityCode);
++        main.put("pubTime", "");
++        main.put("currentPage", Math.max(0, zeroBasedPage));
++        main.put("pageSize", 40);
++        main.put("key", keyword == null ? "" : keyword);
++        main.put("suggestTag", "");
++        main.put("workYearCode", "");
++        main.put("compId", "");
++        main.put("compName", "");
++        main.put("compTag", "");
++        main.put("industry", "");
++        main.put("salaryCode", "");
++        main.put("jobKind", "");
++        main.put("compScale", "");
++        main.put("compKind", "");
++        main.put("compStage", "");
++        main.put("eduLevel", "");
++        main.put("salaryLow", "");
++        main.put("salaryHigh", "");
++
++        Map<String, Object> passThrough = new LinkedHashMap<>();
++        passThrough.put("scene", "init");
++        passThrough.put("skId", "");
++        passThrough.put("fkId", "");
++        passThrough.put("ckId", firstNonBlank(sessionId, runtimeId()));
++        passThrough.put("suggest", null);
++
++        Map<String, Object> data = new LinkedHashMap<>();
++        data.put("mainSearchPcConditionForm", main);
++        data.put("passThroughForm", passThrough);
++        return writeJson(Map.of("data", data));
++    }
++
++    URI endpoint() {
++        return endpoint;
++    }
++
++    private boolean looksLikeJson(String body) {
++        try {
++            objectMapper.readTree(body);
++            return true;
++        } catch (Exception ignored) {
++            return false;
++        }
++    }
++
++    private String writeJson(Object value) {
++        try {
++            return objectMapper.writeValueAsString(value);
++        } catch (Exception e) {
++            throw new IllegalStateException("构造猎聘搜索请求体失败", e);
++        }
++    }
++
++    private static String normalizeEndpoint(String raw) {
++        return raw == null || raw.isBlank() ? DEFAULT_ENDPOINT : raw.trim();
++    }
++
++    private static String runtimeId() {
++        return UUID.randomUUID().toString().replace("-", "");
++    }
++
++    private static String encode(String value) {
++        return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8);
++    }
++
++    private static String firstNonBlank(String... values) {
++        for (String value : values) {
++            if (value != null && !value.isBlank()) return value;
++        }
++        return "";
++    }
++
++    private static String messageOf(Throwable error) {
++        String message = error == null ? null : error.getMessage();
++        return message == null || message.isBlank() ? error.getClass().getSimpleName() : message;
++    }
++}
+diff --git a/src/test/java/com/getjobs/worker/manager/BrowserSessionSnapshotTest.java b/src/test/java/com/getjobs/worker/manager/BrowserSessionSnapshotTest.java
+new file mode 100644
+index 0000000..a82eb3a
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/manager/BrowserSessionSnapshotTest.java
+@@ -0,0 +1,36 @@
++package com.getjobs.worker.manager;
++
++import com.microsoft.playwright.options.Cookie;
++import org.junit.jupiter.api.Test;
++
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++
++class BrowserSessionSnapshotTest {
++    @Test
++    void filtersCookieHeaderByDomainAndExposesNamedValues() {
++        Cookie session = new Cookie("session", "abc");
++        session.domain = "api.liepin.com";
++        Cookie xsrf = new Cookie("XSRF-TOKEN", "token");
++        xsrf.domain = ".liepin.com";
++        Cookie other = new Cookie("other", "ignored");
++        other.domain = "example.com";
++
++        BrowserSessionSnapshot snapshot = new BrowserSessionSnapshot(List.of(session, xsrf, other));
++
++        assertEquals("session=abc; XSRF-TOKEN=token", snapshot.cookieHeader("liepin.com"));
++        assertEquals("token", snapshot.value("XSRF-TOKEN"));
++        assertFalse(snapshot.cookieHeader("other.com").contains("session=abc"));
++    }
++
++    @Test
++    void exposesUnifiedReadFallbackState() {
++        ReadRequestStatus status = ReadRequestStatus.browser(true, "HTTP响应为空");
++
++        assertEquals("browser", status.route());
++        assertEquals(true, status.fallback());
++        assertEquals("HTTP响应为空", status.asMap().get("detail"));
++    }
++}
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java
+new file mode 100644
+index 0000000..58995e5
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java
+@@ -0,0 +1,117 @@
++package com.getjobs.worker.liepin;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import com.getjobs.worker.manager.BrowserSessionSnapshot;
++import com.microsoft.playwright.options.Cookie;
++import com.sun.net.httpserver.Headers;
++import com.sun.net.httpserver.HttpExchange;
++import com.sun.net.httpserver.HttpServer;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.Test;
++
++import java.io.IOException;
++import java.net.InetSocketAddress;
++import java.net.URI;
++import java.nio.charset.StandardCharsets;
++import java.time.Duration;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicReference;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class LiepinHttpSearchClientTest {
++    private HttpServer server;
++
++    @AfterEach
++    void stopServer() {
++        if (server != null) {
++            server.stop(0);
++        }
++    }
++
++    @Test
++    void sendsExpectedSearchBodyHeadersAndSessionCookies() throws Exception {
++        AtomicReference<String> requestBody = new AtomicReference<>();
++        AtomicReference<Headers> requestHeaders = new AtomicReference<>();
++        server = startServer(200, "{\"data\":{\"data\":{\"jobCardList\":[]}}}",
++                requestBody, requestHeaders);
++
++        Cookie session = new Cookie("session", "abc");
++        session.domain = "api.liepin.com";
++        Cookie xsrf = new Cookie("XSRF-TOKEN", "token");
++        xsrf.domain = "api-c.liepin.com";
++        BrowserSessionSnapshot snapshot = new BrowserSessionSnapshot(List.of(session, xsrf));
++        LiepinHttpSearchClient client = client();
++
++        LiepinHttpSearchClient.SearchResult result =
++                client.search("医疗设备", "CITY_CODE", 2, snapshot);
++
++        assertTrue(result.success());
++        JsonNode body = new ObjectMapper().readTree(requestBody.get());
++        JsonNode form = body.path("data").path("mainSearchPcConditionForm");
++        assertEquals("医疗设备", form.path("key").asText());
++        assertEquals("CITY_CODE", form.path("city").asText());
++        assertEquals(2, form.path("currentPage").asInt());
++        assertTrue(requestHeaders.get().getFirst("Cookie").contains("session=abc"));
++        assertEquals("token", requestHeaders.get().getFirst("X-XSRF-TOKEN"));
++        assertNotNull(requestHeaders.get().getFirst("X-Fscp-Trace-Id"));
++        assertEquals("init", body.path("data").path("passThroughForm").path("scene").asText());
++    }
++
++    @Test
++    void rejectsHttpFailuresEmptyBodiesAndRiskSignals() throws Exception {
++        server = startServer(429, "too many requests", new AtomicReference<>(), new AtomicReference<>());
++        LiepinHttpSearchClient.SearchResult httpFailure = client().search("x", "", 0, null);
++        assertFalse(httpFailure.success());
++        assertEquals(LiepinHttpSearchClient.FailureKind.HTTP_STATUS, httpFailure.failureKind());
++
++        server.stop(0);
++        server = startServer(200, "", new AtomicReference<>(), new AtomicReference<>());
++        LiepinHttpSearchClient.SearchResult empty = client().search("x", "", 0, null);
++        assertEquals(LiepinHttpSearchClient.FailureKind.EMPTY_BODY, empty.failureKind());
++
++        server.stop(0);
++        server = startServer(200, "captcha required", new AtomicReference<>(), new AtomicReference<>());
++        LiepinHttpSearchClient.SearchResult risk = client().search("x", "", 0, null);
++        assertEquals(LiepinHttpSearchClient.FailureKind.RISK_SIGNAL, risk.failureKind());
++    }
++
++    private LiepinHttpSearchClient client() {
++        return new LiepinHttpSearchClient(
++                java.net.http.HttpClient.newHttpClient(),
++                URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/search"),
++                Duration.ofSeconds(2));
++    }
++
++    private HttpServer startServer(
++            int status,
++            String responseBody,
++            AtomicReference<String> requestBody,
++            AtomicReference<Headers> requestHeaders
++    ) throws IOException {
++        HttpServer created = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
++        created.createContext("/search", exchange -> handle(exchange, status, responseBody,
++                requestBody, requestHeaders));
++        created.start();
++        return created;
++    }
++
++    private void handle(
++            HttpExchange exchange,
++            int status,
++            String responseBody,
++            AtomicReference<String> requestBody,
++            AtomicReference<Headers> requestHeaders
++    ) throws IOException {
++        requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
++        requestHeaders.set(exchange.getRequestHeaders());
++        byte[] bytes = responseBody.getBytes(StandardCharsets.UTF_8);
++        exchange.sendResponseHeaders(status, bytes.length);
++        exchange.getResponseBody().write(bytes);
++        exchange.close();
++    }
++}

@@ -1,0 +1,10 @@
+front/app/liepin/page.tsx
+src/main/java/com/getjobs/application/controller/LiepinController.java
+src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+src/main/java/com/getjobs/application/service/ConfigService.java
+src/main/java/com/getjobs/application/service/LiepinService.java
+src/main/java/com/getjobs/worker/liepin/Liepin.java
+src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+src/main/java/com/getjobs/worker/service/LiepinJobService.java
+src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java
+src/test/java/com/getjobs/worker/liepin/LiepinBatchDeliveryGuardTest.java

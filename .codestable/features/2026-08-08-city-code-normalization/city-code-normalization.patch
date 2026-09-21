@@ -1,0 +1,391 @@
+diff --git a/src/main/java/com/getjobs/application/service/ConfigService.java b/src/main/java/com/getjobs/application/service/ConfigService.java
+index 5d84193..2701935 100644
+--- a/src/main/java/com/getjobs/application/service/ConfigService.java
++++ b/src/main/java/com/getjobs/application/service/ConfigService.java
+@@ -206,23 +206,8 @@ public class ConfigService {
+ 
+         config.setKeywords(KeywordParser.parse(entity == null ? null : entity.getKeywords()));
+ 
+-        // 城市编码：允许传中文名或代码；中文名映射为代码；缺省视为不限
+-        String cityCode = "";
+-        if (entity != null && entity.getCity() != null && !entity.getCity().isEmpty()) {
+-            // 先按中文名查 code；若查不到，尝试该值是否是有效 code
+-            String codeByName = liepinService.getCodeByTypeAndName("city", entity.getCity());
+-            if (codeByName == null || codeByName.isEmpty()) {
+-                String maybeName = liepinService.getNameByTypeAndCode("city", entity.getCity());
+-                if (maybeName == null || maybeName.isEmpty() || maybeName.equals(entity.getCity())) {
+-                    throw new IllegalArgumentException("未在数据库中找到城市编码: " + entity.getCity());
+-                } else {
+-                    cityCode = entity.getCity();
+-                }
+-            } else {
+-                cityCode = codeByName;
+-            }
+-        }
+-        config.setCityCode(cityCode);
++        // 城市编码：名称、代码和历史乱码统一由 LiepinService 解析；空值视为不限
++        config.setCityCode(liepinService.normalizeCityToCode(entity == null ? null : entity.getCity()));
+ 
+         // 薪资代码：支持中文名或代码
+         String salaryCode = entity != null ? entity.getSalaryCode() : null;
+
+diff --git a/src/main/java/com/getjobs/application/service/LiepinService.java b/src/main/java/com/getjobs/application/service/LiepinService.java
+index b1b2c7c..ac53d69 100644
+--- a/src/main/java/com/getjobs/application/service/LiepinService.java
++++ b/src/main/java/com/getjobs/application/service/LiepinService.java
+@@ -21,6 +21,7 @@ import java.sql.Statement;
+ import java.sql.PreparedStatement;
+ import java.sql.Timestamp;
+ import java.sql.Types;
++import java.nio.charset.StandardCharsets;
+ import java.util.stream.Collectors;
+ 
+ /**
+@@ -950,14 +951,18 @@ public class LiepinService {
+         return liepinOptionMapper.selectOne(wrapper);
+     }
+ 
++    private LiepinOptionEntity getOptionByTypeAndName(String type, String name) {
++        QueryWrapper<LiepinOptionEntity> wrapper = new QueryWrapper<>();
++        wrapper.eq("type", type);
++        wrapper.eq("name", name);
++        return liepinOptionMapper.selectOne(wrapper);
++    }
++
+     /**
+      * 根据类型和名称获取代码
+      */
+     public String getCodeByTypeAndName(String type, String name) {
+-        QueryWrapper<LiepinOptionEntity> wrapper = new QueryWrapper<>();
+-        wrapper.eq("type", type);
+-        wrapper.eq("name", name);
+-        LiepinOptionEntity entity = liepinOptionMapper.selectOne(wrapper);
++        LiepinOptionEntity entity = getOptionByTypeAndName(type, name);
+         return entity != null ? entity.getCode() : "";
+     }
+ 
+@@ -969,21 +974,65 @@ public class LiepinService {
+         return entity != null ? entity.getName() : code;
+     }
+ 
+-    /**
+-     * 规范化城市为名称
+-     * 如果传入的是代码，则查找对应的名称；否则直接返回
+-     */
++    /** 将城市名称、城市码或历史 UTF-8 乱码解析为数据库中的城市选项。 */
++    private LiepinOptionEntity resolveCityOption(String cityCodeOrName) {
++        String input = cityCodeOrName == null ? "" : cityCodeOrName.trim();
++        if (input.isEmpty()) {
++            return null;
++        }
++
++        LiepinOptionEntity byCode = getOptionByTypeAndCode("city", input);
++        if (byCode != null) {
++            return byCode;
++        }
++
++        for (String candidate : cityLookupCandidates(input)) {
++            LiepinOptionEntity byName = getOptionByTypeAndName("city", candidate);
++            if (byName != null) {
++                return byName;
++            }
++        }
++
++        throw new IllegalArgumentException("未在数据库中找到城市编码: " + input);
++    }
++
++    /** 规范化城市为编码，空值表示不限。 */
++    public String normalizeCityToCode(String cityCodeOrName) {
++        LiepinOptionEntity option = resolveCityOption(cityCodeOrName);
++        return option == null ? "" : option.getCode();
++    }
++
++    /** 规范化城市为数据库中的名称，空值表示不限。 */
+     public String normalizeCityToName(String cityCodeOrName) {
+-        if (cityCodeOrName == null || cityCodeOrName.isEmpty()) {
+-            return "";
++        LiepinOptionEntity option = resolveCityOption(cityCodeOrName);
++        return option == null ? "" : option.getName();
++    }
++
++    private List<String> cityLookupCandidates(String input) {
++        LinkedHashSet<String> candidates = new LinkedHashSet<>();
++        candidates.add(input);
++        String restored = restoreUtf8Mojibake(input);
++        if (!restored.equals(input)) {
++            candidates.add(restored);
+         }
+-        // 尝试作为代码查找
+-        LiepinOptionEntity entity = getOptionByTypeAndCode("city", cityCodeOrName);
+-        if (entity != null) {
+-            return entity.getName();
++        return new ArrayList<>(candidates);
++    }
++
++    /** 将常见的 UTF-8 被 Latin-1 解码后的文本还原为 UTF-8 文本。 */
++    static String restoreUtf8Mojibake(String value) {
++        if (value == null || value.isEmpty()) {
++            return value;
+         }
+-        // 如果找不到，直接返回原值（可能是手动输入的城市名）
+-        return cityCodeOrName;
++        for (int i = 0; i < value.length(); i++) {
++            if (value.charAt(i) > 0xFF) {
++                return value;
++            }
++        }
++        String restored = new String(
++                value.getBytes(StandardCharsets.ISO_8859_1),
++                StandardCharsets.UTF_8
++        );
++        return restored.indexOf('\uFFFD') >= 0 ? value : restored;
+     }
+ 
+     // ==================== 分析与列表（参考 BossService） ====================
+
+diff --git a/src/main/java/com/getjobs/application/controller/LiepinController.java b/src/main/java/com/getjobs/application/controller/LiepinController.java
+index e27e56d..30cda2f 100644
+--- a/src/main/java/com/getjobs/application/controller/LiepinController.java
++++ b/src/main/java/com/getjobs/application/controller/LiepinController.java
+@@ -358,15 +358,22 @@ public class LiepinController {
+ 
+     /** 更新猎聘配置 */
+     @PutMapping("/config")
+-    public LiepinConfigEntity updateConfig(@RequestBody LiepinConfigEntity config) {
+-        if (config.getCity() != null && !config.getCity().isEmpty()) {
+-            String cityName = liepinService.normalizeCityToName(config.getCity());
+-            config.setCity(cityName);
+-        }
+-        if (config.getId() != null) {
+-            return liepinService.updateConfig(config);
++    public ResponseEntity<?> updateConfig(@RequestBody LiepinConfigEntity config) {
++        try {
++            if (config.getCity() != null && !config.getCity().isEmpty()) {
++                String cityName = liepinService.normalizeCityToName(config.getCity());
++                config.setCity(cityName);
++            }
++            LiepinConfigEntity saved = config.getId() != null
++                    ? liepinService.updateConfig(config)
++                    : liepinService.saveOrUpdateFirstSelective(config);
++            return ResponseEntity.ok(saved);
++        } catch (IllegalArgumentException e) {
++            Map<String, Object> response = new HashMap<>();
++            response.put("success", false);
++            response.put("message", e.getMessage());
++            return ResponseEntity.badRequest().body(response);
+         }
+-        return liepinService.saveOrUpdateFirstSelective(config);
+     }
+ 
+     /** 获取指定类型的选项列表 */
+
+diff --git a/src/test/java/com/getjobs/application/service/LiepinCityNormalizationTest.java b/src/test/java/com/getjobs/application/service/LiepinCityNormalizationTest.java
+index e69de29..1067232 100644
+--- a/src/test/java/com/getjobs/application/service/LiepinCityNormalizationTest.java
++++ b/src/test/java/com/getjobs/application/service/LiepinCityNormalizationTest.java
+@@ -0,0 +1,88 @@
++package com.getjobs.application.service;
++
++import com.getjobs.application.entity.LiepinOptionEntity;
++import com.getjobs.application.mapper.LiepinConfigMapper;
++import com.getjobs.application.mapper.LiepinMapper;
++import com.getjobs.application.mapper.LiepinOptionMapper;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++
++import javax.sql.DataSource;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertThrows;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
++
++class LiepinCityNormalizationTest {
++
++    private static final String MOJIBAKE_NATIONAL = "\u00e5\u0085\u00a8\u00e5\u009b\u00bd";
++
++    private LiepinOptionMapper optionMapper;
++    private LiepinService service;
++
++    @BeforeEach
++    void setUp() {
++        optionMapper = mock(LiepinOptionMapper.class);
++        service = new LiepinService(
++                mock(LiepinConfigMapper.class),
++                optionMapper,
++                mock(LiepinMapper.class),
++                mock(DataSource.class)
++        );
++    }
++
++    @Test
++    void knownNameResolvesToCode() {
++        when(optionMapper.selectOne(any())).thenReturn(null, nationalOption());
++
++        assertEquals("410", service.normalizeCityToCode("全国"));
++    }
++
++    @Test
++    void knownCodeResolvesToCanonicalName() {
++        when(optionMapper.selectOne(any())).thenReturn(nationalOption());
++
++        assertEquals("全国", service.normalizeCityToName("410"));
++    }
++
++    @Test
++    void utf8MojibakeResolvesToCode() {
++        when(optionMapper.selectOne(any())).thenReturn(null, null, nationalOption());
++
++        assertEquals("410", service.normalizeCityToCode(MOJIBAKE_NATIONAL));
++        assertEquals("全国", LiepinService.restoreUtf8Mojibake(MOJIBAKE_NATIONAL));
++    }
++
++    @Test
++    void canonicalUnicodeTextIsLeftUntouchedByRepairCandidate() {
++        assertEquals("全国", LiepinService.restoreUtf8Mojibake("全国"));
++    }
++
++    @Test
++    void blankCityMeansAllCities() {
++        assertEquals("", service.normalizeCityToCode("  "));
++    }
++
++    @Test
++    void unknownCityRaisesClearError() {
++        when(optionMapper.selectOne(any())).thenReturn(null);
++
++        IllegalArgumentException error = assertThrows(
++                IllegalArgumentException.class,
++                () -> service.normalizeCityToCode("不存在的城市")
++        );
++
++        assertTrue(error.getMessage().contains("不存在的城市"));
++    }
++
++    private static LiepinOptionEntity nationalOption() {
++        LiepinOptionEntity option = new LiepinOptionEntity();
++        option.setType("city");
++        option.setName("全国");
++        option.setCode("410");
++        return option;
++    }
++}
+
+diff --git a/src/test/java/com/getjobs/application/service/ConfigServiceCityConfigTest.java b/src/test/java/com/getjobs/application/service/ConfigServiceCityConfigTest.java
+index e69de29..2bc1a9a 100644
+--- a/src/test/java/com/getjobs/application/service/ConfigServiceCityConfigTest.java
++++ b/src/test/java/com/getjobs/application/service/ConfigServiceCityConfigTest.java
+@@ -0,0 +1,40 @@
++package com.getjobs.application.service;
++
++import com.getjobs.application.entity.LiepinConfigEntity;
++import com.getjobs.application.mapper.ConfigMapper;
++import com.getjobs.worker.liepin.LiepinConfig;
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++class ConfigServiceCityConfigTest {
++
++    private static final String MOJIBAKE_NATIONAL = "\u00e5\u0085\u00a8\u00e5\u009b\u00bd";
++
++    @Test
++    void workerConfigUsesTheSharedCityNormalizer() {
++        ConfigMapper configMapper = mock(ConfigMapper.class);
++        LiepinService liepinService = mock(LiepinService.class);
++        LiepinConfigEntity entity = new LiepinConfigEntity();
++        entity.setCity(MOJIBAKE_NATIONAL);
++
++        when(liepinService.getFirstConfig()).thenReturn(entity);
++        when(liepinService.normalizeCityToCode(MOJIBAKE_NATIONAL)).thenReturn("410");
++
++        ConfigService service = new ConfigService(
++                configMapper,
++                liepinService,
++                mock(BossService.class),
++                mock(ZhilianService.class),
++                mock(Job51Service.class)
++        );
++
++        LiepinConfig config = service.getLiepinConfig();
++
++        assertEquals("410", config.getCityCode());
++        verify(liepinService).normalizeCityToCode(MOJIBAKE_NATIONAL);
++    }
++}
+
+diff --git a/src/test/java/com/getjobs/application/controller/LiepinControllerCityConfigTest.java b/src/test/java/com/getjobs/application/controller/LiepinControllerCityConfigTest.java
+index e69de29..38db756 100644
+--- a/src/test/java/com/getjobs/application/controller/LiepinControllerCityConfigTest.java
++++ b/src/test/java/com/getjobs/application/controller/LiepinControllerCityConfigTest.java
+@@ -0,0 +1,65 @@
++package com.getjobs.application.controller;
++
++import com.getjobs.application.entity.LiepinConfigEntity;
++import com.getjobs.application.service.LiepinService;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.springframework.http.HttpStatus;
++import org.springframework.http.ResponseEntity;
++import org.springframework.test.util.ReflectionTestUtils;
++
++import java.util.Map;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertSame;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.never;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++class LiepinControllerCityConfigTest {
++
++    private LiepinController controller;
++    private LiepinService liepinService;
++
++    @BeforeEach
++    void setUp() {
++        controller = new LiepinController();
++        liepinService = mock(LiepinService.class);
++        ReflectionTestUtils.setField(controller, "liepinService", liepinService);
++    }
++
++    @Test
++    void savesCanonicalCityName() {
++        LiepinConfigEntity request = new LiepinConfigEntity();
++        request.setCity("410");
++        LiepinConfigEntity saved = new LiepinConfigEntity();
++        saved.setCity("全国");
++
++        when(liepinService.normalizeCityToName("410")).thenReturn("全国");
++        when(liepinService.saveOrUpdateFirstSelective(request)).thenReturn(saved);
++
++        ResponseEntity<?> response = controller.updateConfig(request);
++
++        assertEquals(HttpStatus.OK, response.getStatusCode());
++        assertSame(saved, response.getBody());
++        assertEquals("全国", request.getCity());
++    }
++
++    @Test
++    void rejectsUnknownCityAsBadRequest() {
++        LiepinConfigEntity request = new LiepinConfigEntity();
++        request.setCity("不存在的城市");
++        when(liepinService.normalizeCityToName("不存在的城市"))
++                .thenThrow(new IllegalArgumentException("未在数据库中找到城市编码: 不存在的城市"));
++
++        ResponseEntity<?> response = controller.updateConfig(request);
++
++        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
++        Map<?, ?> body = (Map<?, ?>) response.getBody();
++        assertEquals(false, body.get("success"));
++        assertEquals("未在数据库中找到城市编码: 不存在的城市", body.get("message"));
++        verify(liepinService, never()).saveOrUpdateFirstSelective(any());
++    }
++}

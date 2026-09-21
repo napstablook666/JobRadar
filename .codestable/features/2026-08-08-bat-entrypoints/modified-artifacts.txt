@@ -1,0 +1,25 @@
+Modified artifacts
+
+start.bat
+stop.bat
+restart.bat
+一键启动.bat (deleted duplicate)
+一键停止.bat (deleted duplicate)
+bin/start-services.ps1
+进度白板.md
+
+Baseline snapshots
+
+baseline/start.bat
+baseline/stop.bat
+
+Kept support artifacts
+
+bin/kill-services.bat
+gradlew.bat
+
+Evidence
+
+bat-entrypoints.patch
+validation-record.md
+rollback-bat-entrypoints.ps1

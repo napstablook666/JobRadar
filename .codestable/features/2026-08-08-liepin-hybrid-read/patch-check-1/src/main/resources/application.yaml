@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: get_jobs
+  profiles:
+    active: dev
+  info:
+    app:
+      name: Get Jobs
+      version: 0.0.1-SNAPSHOT
+      description: https://github.com/loks666/get_jobs
+  banner:
+    charset: UTF-8
+    location: classpath:banner.txt
+  datasource:
+    url: jdbc:sqlite:./db/getjobs.db
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 5
+      connection-test-query: SELECT 1
+  sql:
+    init:
+      mode: never  # 数据库文件已存在，不需要自动初始化
+  output:
+    ansi:
+      enabled: always
+
+# 服务器配置
+server:
+  port: 8888  # 后端 API 固定端口
+
+# 浏览器运行模式：background（默认）或 visible-login（扫码登录）
+getjobs:
+  browser:
+    mode: ${GETJOBS_BROWSER_MODE:background}
+    # browser=全浏览器链路；hybrid=搜索等读请求优先 HTTP，页面动作自动回退浏览器
+    transport: ${GETJOBS_BROWSER_TRANSPORT:hybrid}
+    # auto=后台优先无界面引擎，visible-login 自动复用系统 Chrome CDP
+    engine: ${GETJOBS_BROWSER_ENGINE:auto}
+    # lazy=启动阶段只建 Context；eager=兼容旧行为，启动即创建四个平台页面
+    page-policy: ${GETJOBS_BROWSER_PAGE_POLICY:lazy}
+    # 可选：Chromium headless-shell 可执行文件；为空时使用 Playwright 捆绑 Chromium
+    headless-shell-path: ${GETJOBS_HEADLESS_SHELL:}
+  liepin:
+    # 搜索 JSON 端点可替换为本地 HttpServer，便于回归测试和故障演练
+    search-endpoint: ${GETJOBS_LIEPIN_SEARCH_ENDPOINT:https://api-c.liepin.com/api/com.liepin.searchfront4c.pc-search-job}
+    search-timeout-ms: ${GETJOBS_LIEPIN_SEARCH_TIMEOUT_MS:10000}
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr([%thread]){magenta} %clr(%-5level){highlight} %clr(%logger{36}){cyan} %clr(-){faint} %msg%n"
+  file:
+    name: ./target/logs/get-jobs.log
+  logback:
+    rollingpolicy:
+      max-history: 30
+      max-file-size: 10MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: true  # 打开 MyBatis Plus 启动 banner
+    db-config:
+      id-type: auto
+  mapper-locations: classpath*:/mapper/**/*.xml

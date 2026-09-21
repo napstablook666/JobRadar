@@ -1,0 +1,19 @@
+Focused change manifest for the current working tree.
+
+Configuration:
+- add aiTimeoutRetryEnabled, aiTimeoutMaxRetries, aiTimeoutRetryDelaySeconds
+- migrate the three liepin_config columns when the service starts
+- expose bounded effective values: enabled by default, 3 retries, 3 seconds base delay
+
+Runtime:
+- retry only HttpTimeoutException/TimeoutException/timed-out failures
+- count aiTimeouts, aiRetryAttempts, aiRetrySuccesses and aiRetryable
+- preserve the current search page when retry exhaustion leaves a job unresolved
+- reuse the existing “continue chat” check when a manual retry scans the page again
+
+API/UI:
+- add POST /api/liepin/retry-ai
+- expose retry state in /api/liepin/status
+- add retry settings and a manual retry action to the Liepin page
+
+This manifest is intentionally focused because the worktree contains unrelated pre-existing changes. The exact modified-file snapshots are under modified/.

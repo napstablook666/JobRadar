@@ -1,0 +1,624 @@
+# 本轮猎聘批量发送修复补丁（基线与当前工作区逐文件差异）
+
+# DIFF src\main\java\com\getjobs\worker\liepin\Liepin.java
+
+warning: in the working copy of '.codestable\features\2026-08-07-liepin-batch-send-retry\Liepin.java.baseline', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\Liepin.java.baseline" "b/src\\main\\java\\com\\getjobs\\worker\\liepin\\Liepin.java"
+index be29a4a..ca26aa3 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\Liepin.java.baseline"
++++ "b/src\\main\\java\\com\\getjobs\\worker\\liepin\\Liepin.java"
+@@ -104,7 +104,8 @@ public class Liepin {
+     enum PageScanResult {
+         COMPLETED,
+         STOPPED,
+-        LIMIT_REACHED
++        LIMIT_REACHED,
++        RETRY
+     }
+ 
+     public enum ExecutionOutcome {
+@@ -132,8 +133,8 @@ public class Liepin {
+ 
+     private record PreparedJob(
+             Long jobId,
++            int cardIndex,
+             LiepinEntity entity,
+-            Locator button,
+             String companyName,
+             String jobName,
+             String salary,
+@@ -142,6 +143,9 @@ public class Liepin {
+     ) {
+     }
+ 
++    private record LocatedChatButton(Locator locator, String text) {
++    }
++
+     private static final class AiRunStats {
+         int candidateCount;
+         int cacheHits;
+@@ -151,6 +155,9 @@ public class Liepin {
+         int review;
+         int skipped;
+         int invalid;
++        int aiTimeouts;
++        int buttonFailures;
++        int confirmationFailures;
+         long totalLatencyMs;
+         int latencySamples;
+ 
+@@ -163,6 +170,9 @@ public class Liepin {
+             review = 0;
+             skipped = 0;
+             invalid = 0;
++            aiTimeouts = 0;
++            buttonFailures = 0;
++            confirmationFailures = 0;
+             totalLatencyMs = 0;
+             latencySamples = 0;
+         }
+@@ -177,6 +187,10 @@ public class Liepin {
+             result.put("review", review);
+             result.put("skipped", skipped);
+             result.put("invalid", invalid);
++            result.put("invalidResults", invalid);
++            result.put("aiTimeouts", aiTimeouts);
++            result.put("buttonFailures", buttonFailures);
++            result.put("confirmationFailures", confirmationFailures);
+             result.put("avgLatencyMs", latencySamples == 0 ? 0 : totalLatencyMs / latencySamples);
+             return result;
+         }
+@@ -930,7 +944,7 @@ public class Liepin {
+                     // 先滚动到卡片位置
+                     page.evaluate("(element) => element.scrollIntoView({behavior: 'instant', block: 'center'})", currentJobCard.elementHandle());
+                     // PlaywrightUtil.sleep(1); // 等待滚动完成
+-                    
++
+                     // 再次确保元素在视窗中
+                     page.evaluate("(element) => { const rect = element.getBoundingClientRect(); if (rect.top < 0 || rect.bottom > window.innerHeight) { element.scrollIntoView({behavior: 'instant', block: 'center'}); } }", currentJobCard.elementHandle());
+                     // PlaywrightUtil.sleep(1);
+@@ -1028,60 +1042,11 @@ public class Liepin {
+             Locator button = null;
+             String buttonText = "";
+             try {
+-                // 在当前岗位卡片中查找按钮，尝试多种选择器
+-                
+-                String[] buttonSelectors = {
+-                    "button.ant-btn.ant-btn-primary.ant-btn-round",
+-                    "button.ant-btn.ant-btn-round.ant-btn-primary", 
+-                    "button[class*='ant-btn'][class*='primary']",
+-                    "button[class*='ant-btn'][class*='round']",
+-                    "button[class*='chat'], button[class*='talk']",
+-                    ".chat-btn, .talk-btn, .contact-btn",
+-                    "button:has-text('聊一聊')",
+-                    "button" // 最后尝试所有按钮
+-                };
+-                
+-                for (String selector : buttonSelectors) {
+-                    try {
+-                        Locator tempButtons = currentJobCard.locator(selector);
+-                        int buttonCount = tempButtons.count();
+-                        log.debug("选择器 '{}' 找到 {} 个按钮", selector, buttonCount);
+-                        
+-                        for (int j = 0; j < buttonCount; j++) {
+-                            Locator tempButton = tempButtons.nth(j);
+-                            try {
+-                                if (tempButton.isVisible()) {
+-                                    String text = tempButton.textContent();
+-                                    log.debug("按钮文本: '{}'", text);
+-                                    if (text != null && !text.trim().isEmpty()) {
+-                                        button = tempButton;
+-                                        buttonText = text.trim();
+-                                        // 只关注"聊一聊"按钮
+-                                        if (text.contains("聊一聊")) {
+-                                            log.debug("找到目标按钮: '{}'", text);
+-                                            break;
+-                                        }
+-                                    }
+-                                }
+-                            } catch (Exception ignore) {
+-                                if (isTargetClosedFailure(ignore)) {
+-                                    throw pageClosed(ignore, false);
+-                                }
+-                                log.debug("获取按钮文本失败: {}", ignore.getMessage());
+-                            }
+-                        }
+-                        
+-                        if (button != null && buttonText.contains("聊一聊")) {
+-                            break;
+-                        }
+-                    } catch (Exception e) {
+-                        if (isTargetClosedFailure(e)) {
+-                            throw pageClosed(e, false);
+-                        }
+-                        log.debug("选择器 '{}' 查找失败: {}", selector, e.getMessage());
+-                    }
++                LocatedChatButton locatedButton = findChatButtonInCard(currentJobCard);
++                if (locatedButton != null) {
++                    button = locatedButton.locator();
++                    buttonText = locatedButton.text();
+                 }
+-                
+             } catch (Exception e) {
+                 if (isTargetClosedFailure(e)) {
+                     throw pageClosed(e, false);
+@@ -1130,7 +1095,7 @@ public class Liepin {
+             }
+             if (batchMode) {
+                 batchJobs.add(new PreparedJob(
+-                        jobIdForUpdate, apiEntity, button, companyName, jobName, salary, recruiterName, jd));
++                        jobIdForUpdate, i, apiEntity, companyName, jobName, salary, recruiterName, jd));
+                 aiStats.candidateCount++;
+                 notifyStatsChanged();
+                 continue;
+@@ -1218,29 +1183,29 @@ public class Liepin {
+                         if (boundingBox != null) {
+                             double centerX = boundingBox.x + boundingBox.width / 2;
+                             double centerY = boundingBox.y + boundingBox.height / 2;
+-                            
++
+                             // 先移动到按钮中心
+                             page.mouse().move(centerX, centerY);
+                             Thread.sleep(50);
+-                            
++
+                             // 向右移动2像素
+                             page.mouse().move(centerX + 2, centerY);
+                             Thread.sleep(50);
+-                            
++
+                             // 向左移动2像素（回到中心再向左2像素）
+                             page.mouse().move(centerX - 2, centerY);
+                             Thread.sleep(50);
+-                            
++
+                             // 回到中心位置
+                             page.mouse().move(centerX, centerY);
+                             Thread.sleep(50);
+-                            
++
+                             log.debug("完成鼠标微调，准备点击按钮");
+                         }
+                     } catch (Exception moveError) {
+                         log.warn("鼠标微调失败，直接点击按钮: {}", moveError.getMessage());
+                     }
+-                    
++
+                     if (!rateGuard.before(LiepinRateGuard.Action.SEND)) return PageScanResult.STOPPED;
+                     SendResult sendResult = clickAndObserveMessage(button, useAiMessage ? aiResult.message() : null);
+                     if (sendResult.sent()) {
+@@ -1261,15 +1226,24 @@ public class Liepin {
+                             return PageScanResult.LIMIT_REACHED;
+                         }
+                     } else {
++                        aiStats.confirmationFailures++;
++                        notifyStatsChanged();
+                         recordSkip("发送状态不确定");
+                         info(String.format("【%s】【%s】发送状态不确定，未更新已投递状态", companyName, jobName));
++                        info(String.format("【%s】【%s】本页发送未确认，保留当前页等待重试", companyName, jobName));
++                        return pageResultAfterSend(false);
+                     }
+                     
+                 } catch (Exception e) {
+                     if (isTargetClosedFailure(e)) {
+                         throw pageClosed(e, true);
+                     }
++                    aiStats.buttonFailures++;
++                    notifyStatsChanged();
++                    recordSkip("按钮或点击失败");
+                     log.error("点击按钮失败: {}", e.getMessage());
++                    info(String.format("【%s】【%s】按钮或点击异常，保留当前页等待重试", companyName, jobName));
++                    return PageScanResult.RETRY;
+                 }
+         }
+         if (batchMode) {
+@@ -1440,6 +1414,10 @@ public class Liepin {
+             notifyStatsChanged();
+             return LiepinAiBatchAssessment.parse(raw);
+         } catch (Exception e) {
++            if (isAiTimeoutFailure(e)) {
++                aiStats.aiTimeouts++;
++                notifyStatsChanged();
++            }
+             log.warn("批量 AI 评分请求失败，岗位数={}, model={}: {}", jobs.size(), model, e.getMessage());
+             return null;
+         }
+@@ -1530,25 +1508,53 @@ public class Liepin {
+             notifyStatsChanged();
+             return LiepinAiBatchMessage.parse(raw);
+         } catch (Exception e) {
++            if (isAiTimeoutFailure(e)) {
++                aiStats.aiTimeouts++;
++                notifyStatsChanged();
++            }
+             log.warn("批量 AI 话术请求失败，岗位数={}, model={}: {}", jobs.size(), model, e.getMessage());
+             return null;
+         }
+     }
+ 
+     private PageScanResult sendPreparedJob(PreparedJob job, String message) {
++        Locator button;
++        try {
++            button = findPreparedJobButton(job);
++        } catch (Exception e) {
++            if (isTargetClosedFailure(e)) throw pageClosed(e, false);
++            aiStats.buttonFailures++;
++            notifyStatsChanged();
++            recordSkip("页面重定位失败");
++            log.warn("批量模式页面重定位失败，jobId={}, index={}: {}",
++                    job.jobId(), job.cardIndex(), e.getMessage());
++            return PageScanResult.RETRY;
++        }
++        if (button == null) {
++            aiStats.buttonFailures++;
++            notifyStatsChanged();
++            recordSkip("按钮失效");
++            info(String.format("【%s】【%s】发送前未找到有效的聊一聊按钮，保留当前页等待重试",
++                    job.companyName(), job.jobName()));
++            return PageScanResult.RETRY;
++        }
++
+         try {
+-            var boundingBox = job.button().boundingBox();
++            var boundingBox = button.boundingBox();
+             if (boundingBox != null) {
+                 double centerX = boundingBox.x + boundingBox.width / 2;
+                 double centerY = boundingBox.y + boundingBox.height / 2;
+                 page.mouse().move(centerX, centerY);
+             }
+             if (!rateGuard.before(LiepinRateGuard.Action.SEND)) return PageScanResult.STOPPED;
+-            SendResult sendResult = clickAndObserveMessage(job.button(), message);
++            SendResult sendResult = clickAndObserveMessage(button, message);
+             if (!sendResult.sent()) {
++                aiStats.confirmationFailures++;
++                notifyStatsChanged();
+                 recordSkip("发送状态不确定");
+                 info(String.format("【%s】【%s】发送状态不确定，未更新已投递状态", job.companyName(), job.jobName()));
+-                return PageScanResult.COMPLETED;
++                info(String.format("【%s】【%s】本页发送未确认，保留当前页等待重试", job.companyName(), job.jobName()));
++                return pageResultAfterSend(false);
+             }
+             resultList.add(String.format("【%s %s %s %s】", job.companyName(), job.jobName(),
+                     job.salary(), job.recruiterName()));
+@@ -1564,11 +1570,80 @@ public class Liepin {
+             }
+         } catch (Exception e) {
+             if (isTargetClosedFailure(e)) throw pageClosed(e, true);
+-            log.error("批量模式点击按钮失败: {}", e.getMessage());
++            aiStats.buttonFailures++;
++            notifyStatsChanged();
++            recordSkip("按钮或点击失败");
++            log.error("批量模式点击按钮失败，保留当前页等待重试: {}", e.getMessage());
++            return PageScanResult.RETRY;
+         }
+         return PageScanResult.COMPLETED;
+     }
+ 
++    private Locator findPreparedJobButton(PreparedJob job) {
++        Locator card = findCurrentJobCard(job);
++        if (card == null) return null;
++        try {
++            page.evaluate("(element) => element.scrollIntoView({behavior: 'instant', block: 'center'})",
++                    card.elementHandle());
++            card.hover(new Locator.HoverOptions().setTimeout(5000));
++            LocatedChatButton located = findChatButtonInCard(card);
++            if (located == null || !located.text().contains("聊一聊")) return null;
++            return located.locator();
++        } catch (Exception e) {
++            if (isTargetClosedFailure(e)) throw pageClosed(e, false);
++            if (e instanceof RuntimeException runtime) throw runtime;
++            throw new IllegalStateException("读取当前岗位卡片失败", e);
++        }
++    }
++
++    private Locator findCurrentJobCard(PreparedJob job) {
++        Locator cards = page.locator(JOB_CARDS);
++        int count = cards.count();
++        if (job.jobId() != null) {
++            for (int i = 0; i < count; i++) {
++                Locator candidate = cards.nth(i);
++                try {
++                    if (job.jobId().equals(extractJobIdFromCard(candidate))) return candidate;
++                } catch (Exception e) {
++                    if (isTargetClosedFailure(e)) throw pageClosed(e, false);
++                }
++            }
++        }
++        return job.cardIndex() >= 0 && job.cardIndex() < count ? cards.nth(job.cardIndex()) : null;
++    }
++
++    private LocatedChatButton findChatButtonInCard(Locator card) {
++        String[] buttonSelectors = {
++                "button.ant-btn.ant-btn-primary.ant-btn-round",
++                "button.ant-btn.ant-btn-round.ant-btn-primary",
++                "button[class*='ant-btn'][class*='primary']",
++                "button[class*='ant-btn'][class*='round']",
++                "button[class*='chat'], button[class*='talk']",
++                ".chat-btn, .talk-btn, .contact-btn",
++                "button:has-text('聊一聊')",
++                "button"
++        };
++        LocatedChatButton fallback = null;
++        for (String selector : buttonSelectors) {
++            try {
++                Locator buttons = card.locator(selector);
++                for (int i = 0; i < buttons.count(); i++) {
++                    Locator candidate = buttons.nth(i);
++                    if (!candidate.isVisible()) continue;
++                    String text = safeText(candidate.textContent());
++                    if (text == null || text.isBlank()) continue;
++                    LocatedChatButton located = new LocatedChatButton(candidate, text.trim());
++                    if (located.text().contains("聊一聊")) return located;
++                    if (fallback == null) fallback = located;
++                }
++            } catch (Exception e) {
++                if (isTargetClosedFailure(e)) throw pageClosed(e, false);
++                log.debug("选择器 '{}' 查找失败: {}", selector, e.getMessage());
++            }
++        }
++        return fallback;
++    }
++
+     private List<List<PreparedJob>> splitJobs(List<PreparedJob> jobs, int size) {
+         List<List<PreparedJob>> groups = new ArrayList<>();
+         for (int i = 0; i < jobs.size(); i += size) {
+@@ -1737,6 +1812,10 @@ public class Liepin {
+             notifyStatsChanged();
+             return classifyAiResponse(result);
+         } catch (Exception e) {
++            if (isAiTimeoutFailure(e)) {
++                aiStats.aiTimeouts++;
++                notifyStatsChanged();
++            }
+             log.warn("猎聘AI请求失败，将跳过当前岗位，不发送平台预设语: {}", e.getMessage());
+             return new AiGreetingResult(null, false);
+         }
+@@ -1767,6 +1846,10 @@ public class Liepin {
+             notifyStatsChanged();
+             return LiepinAiAssessment.parse(result);
+         } catch (Exception e) {
++            if (isAiTimeoutFailure(e)) {
++                aiStats.aiTimeouts++;
++                notifyStatsChanged();
++            }
+             log.warn("猎聘AI评分请求失败，将跳过当前岗位: {}", e.getMessage());
+             return null;
+         }
+@@ -1788,6 +1871,26 @@ public class Liepin {
+                 && !result.message().isBlank();
+     }
+ 
++    static PageScanResult pageResultAfterSend(boolean confirmed) {
++        return confirmed ? PageScanResult.COMPLETED : PageScanResult.RETRY;
++    }
++
++    static boolean isAiTimeoutFailure(Throwable error) {
++        Throwable current = error;
++        while (current != null) {
++            if (current instanceof java.net.http.HttpTimeoutException
++                    || current instanceof java.util.concurrent.TimeoutException) {
++                return true;
++            }
++            String message = current.getMessage();
++            if (message != null && message.toLowerCase(Locale.ROOT).contains("timed out")) {
++                return true;
++            }
++            current = current.getCause();
++        }
++        return false;
++    }
++
+     static boolean passesAutoAiScreening(LiepinConfig config, LiepinAiAssessment assessment) {
+         return config != null
+                 && config.isAutoAiDeliveryEnabled()
+
+# DIFF src\main\java\com\getjobs\application\service\AiService.java
+
+warning: in the working copy of '.codestable\features\2026-08-07-liepin-batch-send-retry\AiService.java.baseline', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\AiService.java.baseline" "b/src\\main\\java\\com\\getjobs\\application\\service\\AiService.java"
+index cb2d4c6..579fecb 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\AiService.java.baseline"
++++ "b/src\\main\\java\\com\\getjobs\\application\\service\\AiService.java"
+@@ -37,6 +37,8 @@ import java.util.regex.Pattern;
+ @Slf4j
+ @RequiredArgsConstructor
+ public class AiService {
++    private static final Duration AI_REQUEST_TIMEOUT = Duration.ofSeconds(60);
++
+     public static final String DEFAULT_SCREEN_PROMPT = """
+             你是严格的岗位匹配评分器。候选人资料只用于判断岗位匹配度，不得编造候选人经历。
+             对输入的岗位逐项评分，输出唯一 JSON 对象，不要 Markdown、解释或额外字段。
+@@ -135,7 +137,7 @@ public class AiService {
+                 .header("Accept", "application/json")
+                 .header("Authorization", "Bearer " + apiKey)
+                 .header("api-key", apiKey)
+-                .timeout(Duration.ofSeconds(60))
++                .timeout(AI_REQUEST_TIMEOUT)
+                 .POST(HttpRequest.BodyPublishers.ofString(requestData.toString()))
+                 .build();
+ 
+@@ -442,7 +444,7 @@ public class AiService {
+      * 使用 Responses API 发送一次请求（用于自动降级/重试）
+      */
+     private String sendRequestViaResponses(String content, String apiKey, String model, String endpoint) {
+-        int timeoutInSeconds = 60;
++        int timeoutInSeconds = 10;
+         HttpClient client = HttpClient.newBuilder()
+                 .connectTimeout(Duration.ofSeconds(timeoutInSeconds))
+                 .build();
+@@ -458,6 +460,7 @@ public class AiService {
+                 .header("Accept", "application/json")
+                 .header("Authorization", "Bearer " + apiKey)
+                 .header("api-key", apiKey)
++                .timeout(AI_REQUEST_TIMEOUT)
+                 .POST(HttpRequest.BodyPublishers.ofString(requestData.toString()))
+                 .build();
+ 
+
+# DIFF src\main\java\com\getjobs\worker\service\LiepinJobService.java
+
+warning: in the working copy of '.codestable\features\2026-08-07-liepin-batch-send-retry\LiepinJobService.java.baseline', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\LiepinJobService.java.baseline" "b/src\\main\\java\\com\\getjobs\\worker\\service\\LiepinJobService.java"
+index 5838a60..d93109b 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\LiepinJobService.java.baseline"
++++ "b/src\\main\\java\\com\\getjobs\\worker\\service\\LiepinJobService.java"
+@@ -80,16 +80,20 @@ public class LiepinJobService implements JobPlatformService {
+     }
+ 
+     private static Map<String, Object> emptyAiSummary() {
+-        return Map.of(
+-                "candidateCount", 0,
+-                "cacheHits", 0,
+-                "screenCalls", 0,
+-                "messageCalls", 0,
+-                "passed", 0,
+-                "review", 0,
+-                "skipped", 0,
+-                "invalid", 0,
+-                "avgLatencyMs", 0
++        return Map.ofEntries(
++                Map.entry("candidateCount", 0),
++                Map.entry("cacheHits", 0),
++                Map.entry("screenCalls", 0),
++                Map.entry("messageCalls", 0),
++                Map.entry("passed", 0),
++                Map.entry("review", 0),
++                Map.entry("skipped", 0),
++                Map.entry("invalid", 0),
++                Map.entry("invalidResults", 0),
++                Map.entry("aiTimeouts", 0),
++                Map.entry("buttonFailures", 0),
++                Map.entry("confirmationFailures", 0),
++                Map.entry("avgLatencyMs", 0)
+         );
+     }
+ 
+
+# DIFF front\app\liepin\page.tsx
+
+warning: in the working copy of '.codestable\features\2026-08-07-liepin-batch-send-retry\page.tsx.baseline', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\page.tsx.baseline" "b/front\\app\\liepin\\page.tsx"
+index 546d0f1..bf4d17d 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\page.tsx.baseline"
++++ "b/front\\app\\liepin\\page.tsx"
+@@ -87,6 +87,10 @@ interface AiSummary {
+   review?: number
+   skipped?: number
+   invalid?: number
++  invalidResults?: number
++  aiTimeouts?: number
++  buttonFailures?: number
++  confirmationFailures?: number
+   avgLatencyMs?: number
+ }
+ 
+@@ -99,6 +103,10 @@ const EMPTY_AI_SUMMARY: AiSummary = {
+   review: 0,
+   skipped: 0,
+   invalid: 0,
++  invalidResults: 0,
++  aiTimeouts: 0,
++  buttonFailures: 0,
++  confirmationFailures: 0,
+   avgLatencyMs: 0,
+ }
+ 
+@@ -650,12 +658,15 @@ export default function LiepinPage() {
+           <span className="text-sm font-medium text-emerald-900">本轮 AI 处理</span>
+           <span className="text-xs text-emerald-700">平均响应 {aiSummary.avgLatencyMs ?? 0}ms</span>
+         </div>
+-        <div className="grid grid-cols-2 gap-2 text-xs text-emerald-900 sm:grid-cols-5">
++        <div className="grid grid-cols-2 gap-2 text-xs text-emerald-900 sm:grid-cols-4">
+           <span>候选 {aiSummary.candidateCount ?? 0}</span>
+           <span>缓存命中 {aiSummary.cacheHits ?? 0}</span>
+           <span>评分请求 {aiSummary.screenCalls ?? 0}</span>
+           <span>话术请求 {aiSummary.messageCalls ?? 0}</span>
+           <span>通过 / 复核 {aiSummary.passed ?? 0} / {aiSummary.review ?? 0}</span>
++          <span>AI超时 {aiSummary.aiTimeouts ?? 0}</span>
++          <span>结果无效 {aiSummary.invalidResults ?? aiSummary.invalid ?? 0}</span>
++          <span>按钮失效 {aiSummary.buttonFailures ?? 0}</span>
+         </div>
+       </div>
+ 
+
+# DIFF 进度白板.md
+
+warning: in the working copy of '.codestable\features\2026-08-07-liepin-batch-send-retry\进度白板.md.baseline', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\\350\277\233\345\272\246\347\231\275\346\235\277.md.baseline" "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+index 3c70d5b..d62a016 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\\350\277\233\345\272\246\347\231\275\346\235\277.md.baseline"
++++ "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+@@ -53,7 +53,17 @@
+ ✅ 已完成：主端口服务重载与停止接口回归 —— `6866/8888` 已加载最新源码，启动后立即停止在 288ms 内收敛到 `PAUSED`，本轮成功数为 0。
+ ✅ 已完成：APP 极限激进间歇 —— 默认发送 30-60 秒、搜索 10-20 秒、翻页 5-10 秒、详情 8-15 秒、批次冷却 300-450 秒。
+ ✅ 已完成：APP 极限间歇验证与回滚 —— Java、页面构建、数据库、源码 patch 和隔离回滚均已通过。
++✅ 已完成：猎聘批量发送引用重定位 —— AI 等待结束后按岗位 ID 重新定位当前卡片和聊一聊按钮，卡片索引仅作回退。
++✅ 已完成：猎聘批量失败页码闸门 —— 按钮失效、点击异常或聊天确认失败均保留当前页，不再保存虚假的完成进度。
++✅ 已完成：AI失败独立统计 —— 状态接口和页面分别显示 AI 超时、结果无效和按钮失效计数。
++✅ 已完成：本轮批量投递回归验证 —— 新增无 Locator 引用、失败重试和超时识别测试，定向测试通过。
+ 🔨 正在做：新档位运行态重载 —— 源码和数据库已落盘，待服务重载后启动下一轮任务。
+ ⬜ 还没做：新一轮 APP 真实复测。
+ ⬜ 还没做：真实环境复测跳页 URL 是否稳定（若 currentPage 直跳失败再降级连点翻页）。
++✅ 已完成：猎聘批量发送真实复测 —— 重载修复后的后端后启动 runId=1，处理42个岗位，AI通过1个并确认成功投递1个；原单次上限已恢复为10。
++❓ 需要你决定：无。
++
++✅ 已完成：51job启动反馈与实时运行记录 —— 点击开始投递后立即显示状态，页面实时保留最新5条运行消息，任务结束自动恢复按钮。
++🔨 正在做：无 —— 51job本轮代码、定向测试和运行态验证已完成。
++⬜ 还没做：全量 Java 回归 —— 当前被工作区原有猎聘代码编译错误阻塞。
+ ❓ 需要你决定：无。
+
+# DIFF src\test\java\com\getjobs\worker\liepin\LiepinBatchDeliveryGuardTest.java
+
+diff --git "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\__empty__" "b/src\\test\\java\\com\\getjobs\\worker\\liepin\\LiepinBatchDeliveryGuardTest.java"
+index e69de29..1a6c9f7 100644
+--- "a/.codestable\\features\\2026-08-07-liepin-batch-send-retry\\__empty__"
++++ "b/src\\test\\java\\com\\getjobs\\worker\\liepin\\LiepinBatchDeliveryGuardTest.java"
+@@ -0,0 +1,48 @@
++package com.getjobs.worker.liepin;
++
++import com.microsoft.playwright.Locator;
++import org.junit.jupiter.api.Test;
++
++import java.net.http.HttpTimeoutException;
++import java.util.Arrays;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class LiepinBatchDeliveryGuardTest {
++
++    @Test
++    void unconfirmedSendKeepsTheCurrentPageForRetry() {
++        assertEquals(Liepin.PageScanResult.RETRY, Liepin.pageResultAfterSend(false));
++        assertEquals(Liepin.PageScanResult.COMPLETED, Liepin.pageResultAfterSend(true));
++    }
++
++    @Test
++    void preparedJobStoresPositionInsteadOfAStaleLocator() {
++        Class<?> preparedJob = Arrays.stream(Liepin.class.getDeclaredClasses())
++                .filter(type -> type.getSimpleName().equals("PreparedJob"))
++                .findFirst()
++                .orElseThrow();
++
++        assertTrue(Arrays.stream(preparedJob.getDeclaredFields())
++                .anyMatch(field -> field.getName().equals("cardIndex")));
++        assertFalse(Arrays.stream(preparedJob.getDeclaredFields())
++                .anyMatch(field -> Locator.class.isAssignableFrom(field.getType())));
++    }
++
++    @Test
++    void timeoutDetectionHandlesWrappedHttpTimeouts() {
++        assertTrue(Liepin.isAiTimeoutFailure(new HttpTimeoutException("request timed out")));
++        assertTrue(Liepin.isAiTimeoutFailure(new RuntimeException(new HttpTimeoutException("timeout"))));
++        assertFalse(Liepin.isAiTimeoutFailure(new IllegalStateException("invalid JSON")));
++    }
++
++    @Test
++    void aiSummaryExposesIndependentFailureCounters() {
++        var summary = new Liepin().getAiSummary();
++        assertEquals(0, summary.get("aiTimeouts"));
++        assertEquals(0, summary.get("invalidResults"));
++        assertEquals(0, summary.get("buttonFailures"));
++    }
++}

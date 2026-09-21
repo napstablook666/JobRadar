@@ -1,0 +1,3 @@
+.codestable/features/2026-08-08-liepin-search-timeout/baseline/Liepin.java  2CE51F50F980901FAF5B502FF9BA3785E4D00A6E6684465FDF29146BBE53928D
+.codestable/features/2026-08-08-liepin-search-timeout/baseline/LiepinHttpSearchClient.java  0A43F799E828A2A974A6EC292B15D9BBDC9951425868567C7ECCE26CA8DFDC87
+.codestable/features/2026-08-08-liepin-search-timeout/baseline/LiepinHttpSearchClientTest.java  1F9D795FD6096E882B2E9AF9AB3116398586AC95B3F0540D740B6B3CB81FADB6

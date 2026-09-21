@@ -1,0 +1,494 @@
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index ece639d..1270151 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -58,6 +58,8 @@ import static com.getjobs.worker.liepin.Locators.*;
+ public class Liepin {
+     private static final int MAX_PAGE_RECOVERY_ATTEMPTS = 1;
+     private static final String SEARCH_API_FRAGMENT = "com.liepin.searchfront4c.pc-search-job";
++    private static final long SEARCH_RESPONSE_TIMEOUT_MS = 12_000L;
++    private static final long SEARCH_NAVIGATION_TIMEOUT_MS = 15_000L;
+     private static final List<String> RELEVANT_DOMAIN_TERMS = List.of(
+             "放疗", "医疗器械", "医疗设备", "医学影像", "核医学", "直线加速器",
+             "质子治疗", "重离子", "医用影像", "临床应用", "影像设备"
+@@ -678,7 +680,7 @@ public class Liepin {
+             }
+         } else if (startPage > 1) {
+             info(String.format("从第【%d】页继续投递【%s】", startPage, cleanKeyword));
+-            if (salaryFilterConfigured && !navigateToPageByPagination(startPage)) return;
++            if (salaryFilterConfigured && !navigateToPageByPagination(startPage, cleanKeyword)) return;
+         }
+         
+         boolean finishedAllPages = false;
+@@ -727,9 +729,11 @@ public class Liepin {
+                 if (!disabled) {
+                     Locator btn = nextLi.first().locator("button.ant-pagination-item-link");
+                     if (btn.count() > 0) {
+-                        if (!clickNextPageAndCaptureResponse(btn.first())) return;
++                        if (!clickNextPageAndCaptureResponse(
++                                btn.first(), cleanKeyword, i + 1, currentHttpSalaryCode())) return;
+                     } else {
+-                        if (!clickNextPageAndCaptureResponse(nextLi.first())) return;
++                        if (!clickNextPageAndCaptureResponse(
++                                nextLi.first(), cleanKeyword, i + 1, currentHttpSalaryCode())) return;
+                     }
+                 } else {
+                     finishedAllPages = true;
+@@ -787,8 +791,9 @@ public class Liepin {
+             throw new IllegalStateException("猎聘“自定义”薪资输入框数量异常，期望可见的最低/最高两个输入框");
+         }
+         try {
+-            inputs.nth(0).fill(salaryRange.minText());
+-            inputs.nth(1).fill(salaryRange.maxText());
++            // 网页控件只接受整数万元；边界向外取整，保证不会把本地薪资范围收窄。
++            inputs.nth(0).fill(formatWebValue(Math.floor(salaryRange.minWan())));
++            inputs.nth(1).fill(formatWebValue(Math.ceil(salaryRange.maxWan())));
+             assertWebSalaryInput(inputs.nth(0), salaryRange.minWan(), "最低");
+             assertWebSalaryInput(inputs.nth(1), salaryRange.maxWan(), "最高");
+         } catch (RuntimeException e) {
+@@ -802,24 +807,17 @@ public class Liepin {
+         if (!rateGuard.before(LiepinRateGuard.Action.SEARCH)) {
+             return false;
+         }
+-        try {
+-            Response response = page.waitForResponse(
+-                    this::isSearchResponse,
+-                    confirm::click
+-            );
+-            validateSearchResponse(response);
+-            if (!parseSearchResponse(response)) {
+-                throw new IllegalStateException("猎聘自定义薪资确认后的搜索响应未解析到岗位数据结构");
+-            }
+-            readRequestStatus = ReadRequestStatus.browser(false, "自定义薪资确认后的浏览器搜索");
+-            rateGuard.completed(LiepinRateGuard.Action.SEARCH);
+-        } catch (RateLimitSignalException signal) {
+-            throw signal;
+-        } catch (RuntimeException e) {
+-            if (isTargetClosedFailure(e)) {
+-                throw pageClosed(e, false);
+-            }
+-            throw new IllegalStateException("猎聘自定义薪资确认或搜索响应捕获失败: " + e.getMessage(), e);
++        String salaryCode = salaryCodeForHttpFallback(salaryRange);
++        if (!captureSearchAfterAction(
++                "自定义薪资确认",
++                LiepinRateGuard.Action.SEARCH,
++                confirm::click,
++                keyword,
++                0,
++                salaryCode
++        )) {
++            info("猎聘自定义薪资确认后的搜索响应未捕获，保留当前关键词等待重试");
++            return false;
+         }
+ 
+         verifyAppliedWebSalaryFilter(salaryRange);
+@@ -873,10 +871,27 @@ public class Liepin {
+         } catch (NumberFormatException e) {
+             throw new IllegalStateException("猎聘自定义薪资" + label + "值不是数字: " + actualText, e);
+         }
+-        if (!Double.isFinite(actual) || Math.abs(actual - expected) > 0.0001d) {
++        if (!Double.isFinite(actual)) {
++            throw new IllegalStateException("猎聘自定义薪资" + label + "值不是有限数字: " + actualText);
++        }
++        boolean exact = Math.abs(actual - expected) <= 0.0001d;
++        // 页面输入框会把非整数年薪万元归一为整数：最低值向下取整，最高值向上取整。
++        boolean normalized = Math.abs(actual - Math.rint(actual)) <= 0.0001d
++                && (("最低".equals(label)
++                && actual <= expected + 0.0001d
++                && expected - actual <= 1.0001d)
++                || ("最高".equals(label)
++                && actual >= expected - 0.0001d
++                && actual - expected <= 1.0001d));
++        if (!exact && !normalized) {
+             throw new IllegalStateException(String.format(Locale.ROOT,
+                     "猎聘自定义薪资%s值回读不一致，期望%s，实际%s", label, expected, actualText));
+         }
++        if (normalized) {
++            info(String.format(Locale.ROOT,
++                    "猎聘自定义薪资%s值被平台归一为%s，继续校验最终范围覆盖配置",
++                    label, actualText));
++        }
+     }
+ 
+     private void verifyAppliedWebSalaryFilter(LiepinService.WebSalaryRange requested) {
+@@ -916,7 +931,7 @@ public class Liepin {
+     }
+ 
+     /** 网页筛选后从第一页通过分页控件回到断点页，保留当前薪资筛选状态。 */
+-    private boolean navigateToPageByPagination(int targetPage) {
++    private boolean navigateToPageByPagination(int targetPage, String keyword) {
+         for (int pageNumber = 2; pageNumber <= targetPage; pageNumber++) {
+             if (shouldStop()) {
+                 return false;
+@@ -939,7 +954,8 @@ public class Liepin {
+             if (button.count() == 0) {
+                 button = nextLi.first();
+             }
+-            if (!clickNextPageAndCaptureResponse(button.first())) {
++            if (!clickNextPageAndCaptureResponse(
++                    button.first(), keyword, pageNumber - 1, currentHttpSalaryCode())) {
+                 return false;
+             }
+             if (!waitForSearchResults()) {
+@@ -1025,7 +1041,9 @@ public class Liepin {
+             LiepinHttpSearchClient.SearchResult httpResult = requestSearchOverHttp(searchUrl);
+             if (httpResult != null && httpResult.success() && parseAndPersistLiepinData(httpResult.body())) {
+                 try {
+-                    page.navigate(searchUrl);
++                    page.navigate(searchUrl, new Page.NavigateOptions()
++                            .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
++                            .setTimeout(SEARCH_NAVIGATION_TIMEOUT_MS));
+                     rateGuard.completed(LiepinRateGuard.Action.SEARCH);
+                     readRequestStatus = ReadRequestStatus.http("猎聘搜索HTTP读取成功");
+                     return true;
+@@ -1048,47 +1066,58 @@ public class Liepin {
+             }
+         }
+ 
+-        RuntimeException lastFailure = null;
+-        for (int attempt = 1; attempt <= 2; attempt++) {
+-            try {
+-                Response response = page.waitForResponse(
+-                        this::isSearchResponse,
+-                        () -> page.navigate(searchUrl)
+-                );
+-                validateSearchResponse(response);
+-                if (!parseSearchResponse(response)) {
+-                    throw new IllegalStateException("猎聘浏览器搜索响应未解析到岗位数据结构");
+-                }
+-                readRequestStatus = ReadRequestStatus.browser(httpAttempted,
+-                        httpAttempted && !httpFailureDetail.isBlank()
+-                                ? httpFailureDetail
+-                                : "猎聘浏览器搜索响应读取成功");
+-                rateGuard.completed(LiepinRateGuard.Action.SEARCH);
+-                return true;
+-            } catch (RateLimitSignalException signal) {
+-                throw signal;
+-            } catch (RuntimeException e) {
+-                if (isTargetClosedFailure(e)) {
+-                    throw pageClosed(e, false);
+-                }
+-                lastFailure = e;
+-                log.warn("猎聘搜索导航第{}次失败: {}", attempt, e.getMessage());
+-                if (attempt < 2) {
+-                    if (!rateGuard.before(LiepinRateGuard.Action.SEARCH)) return false;
+-                }
++        try {
++            Response response = page.waitForResponse(
++                    this::isSearchResponse,
++                    new Page.WaitForResponseOptions().setTimeout(SEARCH_RESPONSE_TIMEOUT_MS),
++                    () -> page.navigate(searchUrl, new Page.NavigateOptions()
++                            .setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
++                            .setTimeout(SEARCH_NAVIGATION_TIMEOUT_MS))
++            );
++            validateSearchResponse(response);
++            if (!parseSearchResponse(response)) {
++                throw new IllegalStateException("猎聘浏览器搜索响应未解析到岗位数据结构");
++            }
++            readRequestStatus = ReadRequestStatus.browser(httpAttempted,
++                    httpAttempted && !httpFailureDetail.isBlank()
++                            ? httpFailureDetail
++                            : "猎聘浏览器搜索响应读取成功");
++            rateGuard.completed(LiepinRateGuard.Action.SEARCH);
++            return true;
++        } catch (RateLimitSignalException signal) {
++            throw signal;
++        } catch (RuntimeException e) {
++            if (isTargetClosedFailure(e)) {
++                throw pageClosed(e, false);
+             }
++            log.warn("猎聘搜索导航失败: {}", e.getMessage());
++            throw e;
+         }
+-        throw lastFailure == null
+-                ? new IllegalStateException("猎聘搜索导航失败")
+-                : lastFailure;
+     }
+ 
+     private LiepinHttpSearchClient.SearchResult requestSearchOverHttp(String searchUrl) {
++        return requestSearchOverHttp(searchUrl, "");
++    }
++
++    private LiepinHttpSearchClient.SearchResult requestSearchOverHttp(
++            String searchUrl,
++            String salaryCode
++    ) {
+         String keyword = queryParameter(searchUrl, "key");
+         int currentPage = parsePageParameter(queryParameter(searchUrl, "currentPage"));
+         String cityCode = config == null ? "" : config.getCityCode();
+         BrowserSessionSnapshot snapshot = playwrightManager.getSessionSnapshot();
+-        return liepinHttpSearchClient.search(keyword, cityCode, currentPage, snapshot);
++        return liepinHttpSearchClient.search(keyword, cityCode, currentPage, snapshot, salaryCode);
++    }
++
++    private LiepinHttpSearchClient.SearchResult requestSearchOverHttp(
++            String keyword,
++            int zeroBasedPage,
++            String salaryCode
++    ) {
++        String cityCode = config == null ? "" : config.getCityCode();
++        BrowserSessionSnapshot snapshot = playwrightManager.getSessionSnapshot();
++        return liepinHttpSearchClient.search(keyword, cityCode, zeroBasedPage, snapshot, salaryCode);
+     }
+ 
+     private int parsePageParameter(String raw) {
+@@ -1114,19 +1143,106 @@ public class Liepin {
+         }
+     }
+ 
+-    private boolean clickNextPageAndCaptureResponse(Locator nextButton) {
++    private String currentHttpSalaryCode() {
++        String pageSalaryCode = "";
++        try {
++            pageSalaryCode = page == null ? "" : queryParameter(page.url(), "salaryCode");
++        } catch (Exception ignored) {
++        }
++        return firstNonBlank(pageSalaryCode, config == null ? "" : config.getSalary());
++    }
++
++    private String salaryCodeForHttpFallback(LiepinService.WebSalaryRange salaryRange) {
++        String current = currentHttpSalaryCode();
++        if (!current.isBlank()) {
++            return current;
++        }
++        if (salaryRange == null) {
++            return "";
++        }
++        long minK = Math.round(salaryRange.minWan() / 1.2d);
++        long maxK = Math.round(salaryRange.maxWan() / 1.2d);
++        return minK + "$" + maxK;
++    }
++
++    private static String firstNonBlank(String... values) {
++        if (values == null) return "";
++        for (String value : values) {
++            if (value != null && !value.isBlank()) return value.trim();
++        }
++        return "";
++    }
++
++    private void throwIfHttpRisk(LiepinHttpSearchClient.SearchResult result) {
++        if (result == null || result.success()) {
++            return;
++        }
++        boolean riskStatus = result.statusCode() == 403 || result.statusCode() == 429;
++        boolean riskKind = result.failureKind() == LiepinHttpSearchClient.FailureKind.RISK_SIGNAL;
++        if (!riskStatus && !riskKind) {
++            return;
++        }
++        String detail = firstNonBlank(result.detail(), "HTTP搜索响应出现风控信号");
++        if (rateGuard != null) {
++            rateGuard.stopForSignal(detail);
++        }
++        throw new RateLimitSignalException(detail + "，本次任务已停止");
++    }
++
++    private boolean clickNextPageAndCaptureResponse(
++            Locator nextButton,
++            String keyword,
++            int zeroBasedPage,
++            String salaryCode
++    ) {
+         if (!rateGuard.before(LiepinRateGuard.Action.PAGE)) return false;
++        return captureSearchAfterAction(
++                "翻页",
++                LiepinRateGuard.Action.PAGE,
++                nextButton::click,
++                keyword,
++                zeroBasedPage,
++                salaryCode
++        );
++    }
++
++    private boolean isSearchResponse(Response response) {
++        try {
++            return isSearchResponseUrl(response.url());
++        } catch (Exception e) {
++            return false;
++        }
++    }
++
++    static boolean isSearchResponseUrl(String rawUrl) {
++        if (rawUrl == null || rawUrl.isBlank()) return false;
++        String url = rawUrl.toLowerCase(Locale.ROOT);
++        if (url.contains(SEARCH_API_FRAGMENT + "-cond-init") || url.contains("searchfront4c-cond-init")) {
++            return false;
++        }
++        return url.contains("searchfront4c") && url.contains("search");
++    }
++
++    private boolean captureSearchAfterAction(
++            String operation,
++            LiepinRateGuard.Action action,
++            Runnable trigger,
++            String keyword,
++            int zeroBasedPage,
++            String salaryCode
++    ) {
+         try {
+             Response response = page.waitForResponse(
+                     this::isSearchResponse,
+-                    nextButton::click
++                    new Page.WaitForResponseOptions().setTimeout(SEARCH_RESPONSE_TIMEOUT_MS),
++                    trigger
+             );
+             validateSearchResponse(response);
+             if (!parseSearchResponse(response)) {
+-                throw new IllegalStateException("猎聘下一页搜索响应未解析到岗位数据结构");
++                throw new IllegalStateException(operation + "响应未解析到岗位数据结构");
+             }
+-            readRequestStatus = ReadRequestStatus.browser(false, "猎聘下一页浏览器搜索响应");
+-            rateGuard.completed(LiepinRateGuard.Action.PAGE);
++            readRequestStatus = ReadRequestStatus.browser(false, "猎聘" + operation + "浏览器搜索响应");
++            rateGuard.completed(action);
+             return true;
+         } catch (RateLimitSignalException signal) {
+             throw signal;
+@@ -1134,17 +1250,21 @@ public class Liepin {
+             if (isTargetClosedFailure(e)) {
+                 throw pageClosed(e, false);
+             }
+-            throw new IllegalStateException("猎聘下一页加载失败: " + e.getMessage(), e);
+-        }
+-    }
+-
+-    private boolean isSearchResponse(Response response) {
+-        try {
+-            String url = response.url();
+-            return url != null
+-                    && url.contains(SEARCH_API_FRAGMENT)
+-                    && !url.contains(SEARCH_API_FRAGMENT + "-cond-init");
+-        } catch (Exception e) {
++            String browserDetail = operation + "浏览器响应未捕获: " + messageOf(e);
++            log.warn("{}，尝试HTTP回退", browserDetail);
++            LiepinHttpSearchClient.SearchResult fallback =
++                    requestSearchOverHttp(keyword, zeroBasedPage, firstNonBlank(
++                            queryParameter(page.url(), "salaryCode"), salaryCode));
++            throwIfHttpRisk(fallback);
++            if (fallback != null && fallback.success() && parseAndPersistLiepinData(fallback.body())) {
++                readRequestStatus = new ReadRequestStatus(
++                        "http", true, browserDetail + "；HTTP回退成功");
++                rateGuard.completed(action);
++                return true;
++            }
++            String fallbackDetail = fallback == null ? "HTTP回退无结果" : fallback.detail();
++            readRequestStatus = ReadRequestStatus.browser(true, browserDetail + "；" + fallbackDetail);
++            log.warn("猎聘{}失败，当前页保留等待重试: {}", operation, fallbackDetail);
+             return false;
+         }
+     }
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java b/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
+index 5188316..883954d 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
+@@ -94,9 +94,19 @@ public class LiepinHttpSearchClient {
+             String cityCode,
+             int zeroBasedPage,
+             BrowserSessionSnapshot session
++    ) {
++        return search(keyword, cityCode, zeroBasedPage, session, "");
++    }
++
++    SearchResult search(
++            String keyword,
++            String cityCode,
++            int zeroBasedPage,
++            BrowserSessionSnapshot session,
++            String salaryCode
+     ) {
+         try {
+-            HttpRequest request = buildRequest(keyword, cityCode, zeroBasedPage, session);
++            HttpRequest request = buildRequest(keyword, cityCode, zeroBasedPage, session, salaryCode);
+             HttpResponse<String> response = httpClient.send(
+                     request,
+                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+@@ -133,6 +143,16 @@ public class LiepinHttpSearchClient {
+             String cityCode,
+             int zeroBasedPage,
+             BrowserSessionSnapshot session
++    ) {
++        return buildRequest(keyword, cityCode, zeroBasedPage, session, "");
++    }
++
++    HttpRequest buildRequest(
++            String keyword,
++            String cityCode,
++            int zeroBasedPage,
++            BrowserSessionSnapshot session,
++            String salaryCode
+     ) {
+         String normalizedKeyword = keyword == null ? "" : keyword.trim();
+         String normalizedCity = cityCode == null ? "" : cityCode.trim();
+@@ -164,7 +184,7 @@ public class LiepinHttpSearchClient {
+                 .header("X-Fscp-Std-Info", "{\"client\":\"pc\",\"source\":\"web\"}")
+                 .header("X-Fscp-Token", "")
+                 .POST(HttpRequest.BodyPublishers.ofString(
+-                        buildRequestBody(normalizedKeyword, normalizedCity, zeroBasedPage, sessionId),
++                        buildRequestBody(normalizedKeyword, normalizedCity, zeroBasedPage, sessionId, salaryCode),
+                         StandardCharsets.UTF_8));
+         if (!cookieHeader.isBlank()) {
+             request.header("Cookie", cookieHeader);
+@@ -176,6 +196,16 @@ public class LiepinHttpSearchClient {
+     }
+ 
+     String buildRequestBody(String keyword, String cityCode, int zeroBasedPage, String sessionId) {
++        return buildRequestBody(keyword, cityCode, zeroBasedPage, sessionId, "");
++    }
++
++    String buildRequestBody(
++            String keyword,
++            String cityCode,
++            int zeroBasedPage,
++            String sessionId,
++            String salaryCode
++    ) {
+         Map<String, Object> main = new LinkedHashMap<>();
+         main.put("city", cityCode == null ? "" : cityCode);
+         main.put("dq", cityCode == null ? "" : cityCode);
+@@ -189,7 +219,7 @@ public class LiepinHttpSearchClient {
+         main.put("compName", "");
+         main.put("compTag", "");
+         main.put("industry", "");
+-        main.put("salaryCode", "");
++        main.put("salaryCode", salaryCode == null ? "" : salaryCode.trim());
+         main.put("jobKind", "");
+         main.put("compScale", "");
+         main.put("compKind", "");
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java
+index 58995e5..48c0837 100644
+--- a/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java
+@@ -48,7 +48,7 @@ class LiepinHttpSearchClientTest {
+         LiepinHttpSearchClient client = client();
+ 
+         LiepinHttpSearchClient.SearchResult result =
+-                client.search("医疗设备", "CITY_CODE", 2, snapshot);
++                client.search("医疗设备", "CITY_CODE", 2, snapshot, "6$10");
+ 
+         assertTrue(result.success());
+         JsonNode body = new ObjectMapper().readTree(requestBody.get());
+@@ -56,12 +56,24 @@ class LiepinHttpSearchClientTest {
+         assertEquals("医疗设备", form.path("key").asText());
+         assertEquals("CITY_CODE", form.path("city").asText());
+         assertEquals(2, form.path("currentPage").asInt());
++        assertEquals("6$10", form.path("salaryCode").asText());
+         assertTrue(requestHeaders.get().getFirst("Cookie").contains("session=abc"));
+         assertEquals("token", requestHeaders.get().getFirst("X-XSRF-TOKEN"));
+         assertNotNull(requestHeaders.get().getFirst("X-Fscp-Trace-Id"));
+         assertEquals("init", body.path("data").path("passThroughForm").path("scene").asText());
+     }
+ 
++    @Test
++    void matchesSearchResponsesButExcludesConditionInitialization() {
++        assertTrue(Liepin.isSearchResponseUrl(
++                "https://api-c.liepin.com/api/com.liepin.searchfront4c.pc-search-job"));
++        assertTrue(Liepin.isSearchResponseUrl(
++                "HTTPS://API-C.LIEPIN.COM/API/COM.LIEPIN.SEARCHFRONT4C.PC-SEARCH-JOB"));
++        assertFalse(Liepin.isSearchResponseUrl(
++                "https://api-c.liepin.com/api/com.liepin.searchfront4c.pc-search-job-cond-init"));
++        assertFalse(Liepin.isSearchResponseUrl("https://api-c.liepin.com/api/other-endpoint"));
++    }
++
+     @Test
+     void rejectsHttpFailuresEmptyBodiesAndRiskSignals() throws Exception {
+         server = startServer(429, "too many requests", new AtomicReference<>(), new AtomicReference<>());

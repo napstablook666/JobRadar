@@ -1,0 +1,365 @@
+diff --git a/src/main/java/com/getjobs/worker/service/LiepinJobService.java b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+index b3be562..fa742ca 100644
+--- a/src/main/java/com/getjobs/worker/service/LiepinJobService.java
++++ b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+@@ -11,7 +11,11 @@ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.beans.factory.ObjectProvider;
+ import org.springframework.stereotype.Service;
+ 
++import java.util.ArrayDeque;
++import java.util.ArrayList;
++import java.util.Deque;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.concurrent.TimeUnit;
+@@ -27,6 +31,7 @@ import java.util.function.Consumer;
+ public class LiepinJobService implements JobPlatformService {
+ 
+     private static final String PLATFORM = "liepin";
++    private static final int RECENT_MESSAGE_LIMIT = 8;
+ 
+     private final PlaywrightManager playwrightManager;
+     private final ConfigService configService;
+@@ -42,6 +47,7 @@ public class LiepinJobService implements JobPlatformService {
+     private volatile String lastMessage = "尚未启动投递任务";
+     private volatile String lastMessageType = "idle";
+     private volatile long lastMessageAt = System.currentTimeMillis();
++    private final StatusHistory recentStatus = new StatusHistory(RECENT_MESSAGE_LIMIT);
+     private final Object pendingLock = new Object();
+     private volatile Liepin.GreetingRequest pendingGreeting;
+     private volatile CompletableFuture<Liepin.GreetingAction> pendingDecision;
+@@ -50,6 +56,36 @@ public class LiepinJobService implements JobPlatformService {
+     public record ConfirmationResult(boolean accepted, String message) {
+     }
+ 
++    static final class StatusHistory {
++        private final int limit;
++        private final Deque<JobProgressMessage> messages = new ArrayDeque<>();
++
++        StatusHistory(int limit) {
++            if (limit < 1) {
++                throw new IllegalArgumentException("状态消息上限必须大于0");
++            }
++            this.limit = limit;
++        }
++
++        synchronized void clear() {
++            messages.clear();
++        }
++
++        synchronized void add(JobProgressMessage message) {
++            if (message == null) {
++                return;
++            }
++            messages.addLast(message);
++            while (messages.size() > limit) {
++                messages.removeFirst();
++            }
++        }
++
++        synchronized List<JobProgressMessage> snapshot() {
++            return new ArrayList<>(messages);
++        }
++    }
++
+     static JobProgressMessage buildCompletionMessage(int deliveredCount) {
+         if (deliveredCount > 0) {
+             return JobProgressMessage.success(PLATFORM,
+@@ -73,6 +109,7 @@ public class LiepinJobService implements JobPlatformService {
+         isRunning = true;
+         shouldStop = false;
+         activeProgressCallback = progressCallback;
++        recentStatus.clear();
+         publish(progressCallback, JobProgressMessage.info(PLATFORM, "正在初始化投递任务..."));
+ 
+         try {
+@@ -145,9 +182,7 @@ public class LiepinJobService implements JobPlatformService {
+         log.info("收到停止猎聘任务请求");
+         shouldStop = true;
+         cancelPendingGreeting();
+-        lastMessage = "正在停止投递任务...";
+-        lastMessageType = "info";
+-        lastMessageAt = System.currentTimeMillis();
++        publish(activeProgressCallback, JobProgressMessage.info(PLATFORM, "正在停止投递任务..."));
+     }
+ 
+     /**
+@@ -162,6 +197,12 @@ public class LiepinJobService implements JobPlatformService {
+         status.put("message", lastMessage);
+         status.put("messageType", lastMessageType);
+         status.put("messageAt", lastMessageAt);
++        List<JobProgressMessage> recentMessages = recentStatus.snapshot();
++        if (recentMessages.isEmpty()) {
++            recentMessages = List.of(new JobProgressMessage(
++                    PLATFORM, lastMessageType, lastMessage, null, null, lastMessageAt));
++        }
++        status.put("recentMessages", recentMessages);
+         Liepin.GreetingRequest pending = pendingGreeting;
+         if (pending != null) {
+             Map<String, Object> pendingData = new HashMap<>();
+@@ -245,11 +286,16 @@ public class LiepinJobService implements JobPlatformService {
+     }
+ 
+     private void publish(Consumer<JobProgressMessage> progressCallback, JobProgressMessage message) {
++        if (message == null) {
++            return;
++        }
++        if (message.getTimestamp() == null) {
++            message.setTimestamp(System.currentTimeMillis());
++        }
+         lastMessage = message.getMessage();
+         lastMessageType = message.getType();
+-        lastMessageAt = message.getTimestamp() == null
+-                ? System.currentTimeMillis()
+-                : message.getTimestamp();
++        lastMessageAt = message.getTimestamp();
++        recentStatus.add(message);
+         if (progressCallback != null) {
+             progressCallback.accept(message);
+         }
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index a52af39..70c126f 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -1,6 +1,6 @@
+ 'use client'
+ 
+-import { useState, useEffect } from 'react'
++import { useState, useEffect, useRef } from 'react'
+ import { createSSEWithBackoff } from '@/lib/sse'
+ import { BiSearch, BiSave, BiTargetLock, BiMoney, BiPlay, BiStop, BiLogOut, BiBriefcase, BiCheck, BiX } from 'react-icons/bi'
+ import { Button } from '@/components/ui/button'
+@@ -45,6 +45,15 @@ interface PendingGreeting {
+   source: 'ai' | 'preset'
+ }
+ 
++interface TaskStatusMessage {
++  platform?: string
++  type?: string
++  message: string
++  current?: number | null
++  total?: number | null
++  timestamp?: number | null
++}
++
+ interface LiepinOption {
+   id: number
+   type: string
+@@ -83,6 +92,10 @@ export default function LiepinPage() {
+   const [logoutResult, setLogoutResult] = useState<{ success: boolean; message: string } | null>(null)
+   const [taskMessage, setTaskMessage] = useState('尚未启动投递任务')
+   const [taskMessageType, setTaskMessageType] = useState('idle')
++  const [recentTaskMessages, setRecentTaskMessages] = useState<TaskStatusMessage[]>([
++    { type: 'idle', message: '尚未启动投递任务' },
++  ])
++  const statusLogRef = useRef<HTMLDivElement>(null)
+   const [pendingGreeting, setPendingGreeting] = useState<PendingGreeting | null>(null)
+   const [pageProgress, setPageProgress] = useState<PageProgressItem[]>([])
+   const [resettingProgress, setResettingProgress] = useState(false)
+@@ -171,6 +184,45 @@ export default function LiepinPage() {
+     return JSON.stringify(tokens)
+   }
+ 
++  const formatStatusTime = (timestamp?: number | null): string => {
++    if (!timestamp) return '--:--:--'
++    return new Date(timestamp).toLocaleTimeString('zh-CN', { hour12: false })
++  }
++
++  const statusTypeLabel = (type?: string): string => {
++    switch (type) {
++      case 'progress':
++        return '进度'
++      case 'success':
++        return '成功'
++      case 'warning':
++        return '提醒'
++      case 'error':
++        return '错误'
++      case 'idle':
++        return '待机'
++      default:
++        return '信息'
++    }
++  }
++
++  const statusRowClass = (type?: string): string => {
++    switch (type) {
++      case 'success':
++        return 'border-green-200 bg-green-50 text-green-800'
++      case 'warning':
++        return 'border-amber-200 bg-amber-50 text-amber-800'
++      case 'error':
++        return 'border-red-200 bg-red-50 text-red-800'
++      case 'progress':
++        return 'border-indigo-200 bg-indigo-50 text-indigo-800'
++      case 'idle':
++        return 'border-gray-200 bg-gray-50 text-gray-700'
++      default:
++        return 'border-blue-100 bg-white text-blue-900'
++    }
++  }
++
+   const fetchAllData = async () => {
+     try {
+       const response = await fetch('http://localhost:8888/api/liepin/config')
+@@ -244,6 +296,20 @@ export default function LiepinPage() {
+       setIsDelivering(Boolean(data.isRunning))
+       if (data.message) setTaskMessage(data.message)
+       if (data.messageType) setTaskMessageType(data.messageType)
++      const serverMessages = Array.isArray(data.recentMessages)
++        ? data.recentMessages.filter((item: TaskStatusMessage) => item && typeof item.message === 'string')
++        : []
++      if (serverMessages.length > 0) {
++        setRecentTaskMessages(serverMessages.slice(-8))
++      } else if (data.message) {
++        setRecentTaskMessages([
++          {
++            type: data.messageType || 'info',
++            message: data.message,
++            timestamp: data.messageAt,
++          },
++        ])
++      }
+       setPendingGreeting(data.pendingGreeting || null)
+       return data
+     } catch (error) {
+@@ -272,6 +338,11 @@ export default function LiepinPage() {
+     // 状态轮询只在页面生命周期内运行一次
+   }, [])
+ 
++  useEffect(() => {
++    const log = statusLogRef.current
++    if (log) log.scrollTop = log.scrollHeight
++  }, [recentTaskMessages])
++
+   const handleSave = async () => {
+     try {
+       const payload = { ...config, keywords: serializeKeywordsForDb(config.keywords) }
+@@ -449,6 +520,36 @@ export default function LiepinPage() {
+         投递状态：{taskMessage}
+       </div>
+ 
++      <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-4 py-3">
++        <div className="mb-2 flex items-center justify-between gap-3">
++          <span className="text-sm font-medium text-slate-800">实时运行记录</span>
++          <span className="text-xs text-muted-foreground">最近 {recentTaskMessages.length} 条</span>
++        </div>
++        <div
++          ref={statusLogRef}
++          role="log"
++          aria-live="polite"
++          aria-label="投递实时运行记录"
++          className="max-h-56 space-y-1 overflow-y-auto pr-1"
++        >
++          {recentTaskMessages.map((item, index) => (
++            <div
++              key={`${item.timestamp ?? 'local'}-${index}`}
++              className={`flex items-start gap-2 rounded-md border px-2.5 py-2 text-sm ${statusRowClass(item.type)}`}
++            >
++              <span className="shrink-0 font-mono text-[11px] opacity-70">{formatStatusTime(item.timestamp)}</span>
++              <span className="shrink-0 text-[11px] font-medium">{statusTypeLabel(item.type)}</span>
++              <span className="min-w-0 flex-1 break-words">
++                {item.message}
++                {item.current != null && item.total != null && (
++                  <span className="ml-1 text-xs opacity-75">({item.current}/{item.total})</span>
++                )}
++              </span>
++            </div>
++          ))}
++        </div>
++      </div>
++
+       {pendingGreeting && (
+         <Card className="border-amber-300 bg-amber-50/60">
+           <CardHeader className="pb-3">
+diff --git a/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+index 95f9ada..72e2126 100644
+--- a/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
++++ b/src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+@@ -1,9 +1,18 @@
+ package com.getjobs.worker.service;
+ 
++import com.getjobs.application.service.ConfigService;
+ import com.getjobs.worker.dto.JobProgressMessage;
++import com.getjobs.worker.liepin.Liepin;
++import com.getjobs.worker.manager.PlaywrightManager;
+ import org.junit.jupiter.api.Test;
++import org.springframework.beans.factory.ObjectProvider;
++
++import java.util.List;
++import java.util.Map;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.when;
+ 
+ class LiepinJobServiceDeliveryTest {
+ 
+@@ -22,4 +31,48 @@ class LiepinJobServiceDeliveryTest {
+         assertEquals("success", message.getType());
+         assertEquals("投递任务完成，共发起2个聊天", message.getMessage());
+     }
++
++    @Test
++    void recentStatusKeepsNewestEightMessagesInOrder() {
++        LiepinJobService.StatusHistory history = new LiepinJobService.StatusHistory(8);
++        for (int i = 1; i <= 9; i++) {
++            history.add(JobProgressMessage.info("liepin", "状态" + i));
++        }
++
++        List<JobProgressMessage> messages = history.snapshot();
++
++        assertEquals(8, messages.size());
++        assertEquals("状态2", messages.get(0).getMessage());
++        assertEquals("状态9", messages.get(7).getMessage());
++    }
++
++    @Test
++    void recentStatusCanBeClearedForNextRun() {
++        LiepinJobService.StatusHistory history = new LiepinJobService.StatusHistory(8);
++        history.add(JobProgressMessage.info("liepin", "上一轮"));
++
++        history.clear();
++
++        assertEquals(0, history.snapshot().size());
++    }
++
++    @SuppressWarnings("unchecked")
++    @Test
++    void statusContainsRecentMessagesForInitialState() {
++        PlaywrightManager playwrightManager = mock(PlaywrightManager.class);
++        when(playwrightManager.isLoggedIn("liepin")).thenReturn(false);
++        LiepinJobService service = new LiepinJobService(
++                playwrightManager,
++                mock(ConfigService.class),
++                mock(ObjectProvider.class)
++        );
++
++        Map<String, Object> status = service.getStatus();
++        List<?> recentMessages = (List<?>) status.get("recentMessages");
++        JobProgressMessage initialMessage = (JobProgressMessage) recentMessages.get(0);
++
++        assertEquals(1, recentMessages.size());
++        assertEquals("idle", initialMessage.getType());
++        assertEquals("尚未启动投递任务", initialMessage.getMessage());
++    }
+ }
+diff --git "a/.codestable/features/2026-08-06-liepin-realtime-status/baseline/\350\277\233\345\272\246\347\231\275\346\235\277.md" "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+index 14d76dc..c2f91b8 100644
+--- "a/.codestable/features/2026-08-06-liepin-realtime-status/baseline/\350\277\233\345\272\246\347\231\275\346\235\277.md"
++++ "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+@@ -30,10 +30,12 @@
+ ✅ 已完成：猎聘零成功计数修复 —— 只有聊天确认成功才计入投递数，零成功时显示“本轮未成功发起聊天”，并补充回归测试与回滚产物。
+ ✅ 已完成：清理未投递岗位统计记录 —— 删除 3397 条未投递历史记录，保留 21 条已投递记录，统计接口返回 pending=0。
+ ✅ 已完成：猎聘 AI 筛选自动投递 —— 新增默认关闭的评分自动投递开关、最低评分配置和严格 JSON 评分闸门，保留人工确认模式。
++✅ 已完成：猎聘实时状态日志 —— 页面保留最近 8 条筛选、跳过、评分和投递消息，最新状态自动跟随显示。
+ ✅ 已完成：投递间歇提示时序修复 —— 等待开始、等待结束和无需额外等待分别展示，页面提示与真实节奏同步。
+ ✅ 已完成：51job AI逐岗位打招呼 —— 默认关闭，开启后逐岗位读取JD、生成AI文案并自动发送，无效文案或缺少JD时跳过。
+ ✅ 已完成：51job AI参数与状态 —— 页面支持开关、单次上限和随机间隔，分析列表显示打招呼状态，运行接口回传计数。
+ ✅ 已完成：51job AI本轮验证与产物 —— Java测试、页面定向lint、生产构建、diff检查、patch校验和回滚脚本语法检查均已完成。
++✅ 已完成：侧边栏可折叠 —— 支持展开/80px图标栏切换，内容区同步扩展，刷新和路由切换后保留状态。
+ 🔨 正在做：无。
+ ⬜ 还没做：真实环境复测跳页 URL 是否稳定（若 currentPage 直跳失败再降级连点翻页）。
+ ❓ 需要你决定：无。

@@ -1,0 +1,44 @@
+--- a/start.bat / stop.bat / 一键启动.bat / 一键停止.bat
++++ b/start.bat / stop.bat / 一键启动.bat / 一键停止.bat
+@@
+-setlocal
+-powershell -NoProfile -ExecutionPolicy Bypass -File "..." %*
+-set ERR=%ERRORLEVEL%
++setlocal EnableExtensions
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "..." %*
++set "ERR=%ERRORLEVEL%"
++endlocal & exit /b %ERR%
+
+--- a/bin/kill-services.bat
++++ b/bin/kill-services.bat
+@@
+-cd /d "%~dp0.."
+-powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\\bin\\stop-services.ps1" %*
++setlocal EnableExtensions
++set "ROOT=%~dp0.."
++cd /d "%ROOT%"
++powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\\bin\\stop-services.ps1" %*
++set "ERR=%ERRORLEVEL%"
++endlocal & exit /b %ERR%
+
+--- a/bin/start-services.ps1
++++ b/bin/start-services.ps1
+@@
++function Test-TcpPort(...) { ... }
+@@
+-$pmCmd = "pnpm"
++$pmCmd = "call pnpm.cmd"
+@@
+-$pmCmd = "npx pnpm"
++$pmCmd = "call npx.cmd --yes pnpm"
+@@
+-Test-HttpOk "http://127.0.0.1:8888/"
++Test-TcpPort "127.0.0.1" 8888
+
+--- a/bin/stop-services.ps1
++++ b/bin/stop-services.ps1
+@@
+-$normCl.Contains($normRoot)
++$normCl.IndexOf($normRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+
+验证重点：启动入口从任意当前目录解析仓库路径；后端按监听端口判断就绪，避免根路径 404 造成误报。

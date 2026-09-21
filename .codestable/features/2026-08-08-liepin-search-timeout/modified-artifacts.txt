@@ -1,0 +1,3 @@
+src/main/java/com/getjobs/worker/liepin/Liepin.java
+src/main/java/com/getjobs/worker/liepin/LiepinHttpSearchClient.java
+src/test/java/com/getjobs/worker/liepin/LiepinHttpSearchClientTest.java

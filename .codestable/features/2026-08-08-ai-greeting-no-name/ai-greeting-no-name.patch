@@ -1,0 +1,208 @@
+diff --git a/src/main/java/com/getjobs/application/controller/AiConfigController.java b/src/main/java/com/getjobs/application/controller/AiConfigController.java
+index 5672606..0bffcc3 100644
+--- a/src/main/java/com/getjobs/application/controller/AiConfigController.java
++++ b/src/main/java/com/getjobs/application/controller/AiConfigController.java
+@@ -214,8 +214,15 @@ public class AiConfigController {
+         try {
+             String requestMessage = aiService.renderPrompt(prompt, introduce, keyword, jobName, jd, sayHi);
+             String reply = aiService.sendRequest(requestMessage);
++            AiService.GreetingValidation validation = AiService.validateGreeting(reply, introduce);
++            if (!validation.usable()) {
++                response.put("success", false);
++                response.put("message", "AI预览话术未通过格式校验: " + validation.reason());
++                return ResponseEntity.unprocessableEntity().body(response);
++            }
++
+             response.put("success", true);
+-            response.put("data", reply);
++            response.put("data", validation.message());
+             response.put("message", "AI预览生成成功");
+             return ResponseEntity.ok(response);
+         } catch (IllegalArgumentException e) {
+diff --git a/src/main/java/com/getjobs/application/service/AiService.java b/src/main/java/com/getjobs/application/service/AiService.java
+index 7c56bea..4b7c4bb 100644
+--- a/src/main/java/com/getjobs/application/service/AiService.java
++++ b/src/main/java/com/getjobs/application/service/AiService.java
+@@ -38,6 +38,10 @@ import java.util.regex.Pattern;
+ @RequiredArgsConstructor
+ public class AiService {
+     private static final Duration AI_REQUEST_TIMEOUT = Duration.ofSeconds(60);
++    public static final String GREETING_PREFIX = "您好，我是应用物理学应届毕业生，";
++    private static final Pattern CANDIDATE_NAME_PATTERN = Pattern.compile(
++            "(?:我叫|姓名|名字是)\\s*[:：]?\\s*([\\p{IsHan}]{2,4})");
++
+     public static final String DEFAULT_SCREEN_PROMPT = """
+             你是严格的岗位匹配评分器。候选人资料只用于判断岗位匹配度，不得编造候选人经历。
+             对输入的岗位逐项评分，输出唯一 JSON 对象，不要 Markdown、解释或额外字段。
+@@ -222,6 +226,70 @@ public class AiService {
+         }
+     }
+ 
++    /** 统一校验可直接发送的 AI 打招呼语。 */
++    public record GreetingValidation(boolean usable, boolean rejected, String message, String reason) {
++    }
++
++    /**
++     * 清理常见模型包裹并校验固定开头、长度和姓名泄漏。
++     * 无效话术由各投递入口沿用自己的跳过或预设语回退策略。
++     */
++    public static GreetingValidation validateGreeting(String raw, String introduce) {
++        String message = normalizeGreeting(raw);
++        if (message == null || message.isBlank()) {
++            return invalidGreeting(false, "empty");
++        }
++        if (message.equalsIgnoreCase("false")) {
++            return invalidGreeting(true, "ai_rejected");
++        }
++        if (message.indexOf('\n') >= 0 || message.indexOf('\r') >= 0) {
++            return invalidGreeting(false, "multiline");
++        }
++        if (message.length() > 60) {
++            return invalidGreeting(false, "too_long");
++        }
++        if (!message.startsWith(GREETING_PREFIX)) {
++            return invalidGreeting(false, "wrong_prefix");
++        }
++        if (message.contains("我叫") || message.contains("姓名") || message.contains("名字是")) {
++            return invalidGreeting(false, "name_expression");
++        }
++        for (String name : extractCandidateNames(introduce)) {
++            if (message.contains(name)) {
++                return invalidGreeting(false, "candidate_name");
++            }
++        }
++        return new GreetingValidation(true, false, message, "ok");
++    }
++
++    private static GreetingValidation invalidGreeting(boolean rejected, String reason) {
++        return new GreetingValidation(false, rejected, null, reason);
++    }
++
++    private static String normalizeGreeting(String raw) {
++        if (raw == null) return null;
++        String message = raw.trim();
++        message = message.replaceFirst("^```(?:text|plaintext)?\\s*", "");
++        message = message.replaceFirst("\\s*```$", "").trim();
++        if (message.length() >= 2
++                && ((message.startsWith("\\\"") && message.endsWith("\\\""))
++                || (message.startsWith("“") && message.endsWith("”")))) {
++            message = message.substring(1, message.length() - 1).trim();
++        }
++        return message;
++    }
++
++    private static Set<String> extractCandidateNames(String introduce) {
++        Set<String> names = new LinkedHashSet<>();
++        if (introduce == null || introduce.isBlank()) return names;
++        Matcher matcher = CANDIDATE_NAME_PATTERN.matcher(introduce);
++        while (matcher.find()) {
++            String name = matcher.group(1);
++            if (name != null && !name.isBlank()) names.add(name);
++        }
++        return names;
++    }
++
+     /** 渲染批量 AI 使用的命名模板，避免位置占位符错位。 */
+     public String renderNamedTemplate(String template, Map<String, String> values) {
+         if (template == null || template.isBlank()) {
+diff --git a/src/main/java/com/getjobs/worker/boss/Boss.java b/src/main/java/com/getjobs/worker/boss/Boss.java
+index 3b6fd2b..c11cca0 100644
+--- a/src/main/java/com/getjobs/worker/boss/Boss.java
++++ b/src/main/java/com/getjobs/worker/boss/Boss.java
+@@ -1085,7 +1085,8 @@ public class Boss {
+             if (result == null) {
+                 return config.getSayHi();
+             }
+-            return result.toLowerCase().contains("false") ? config.getSayHi() : result;
++            AiService.GreetingValidation validation = AiService.validateGreeting(result, introduce);
++            return validation.usable() ? validation.message() : config.getSayHi();
+         } catch (Exception e) {
+             log.warn("AI请求失败，使用原有打招呼语: {}", e.getMessage());
+             return config.getSayHi();
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51.java b/src/main/java/com/getjobs/worker/job51/Job51.java
+index d915ebf..a26f577 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51.java
+@@ -723,7 +723,10 @@ public class Job51 {
+             String request = aiService.renderPrompt(prompt, introduce, keyword, jobName, jd, "");
+             AiGreetingResult classified = classifyAiResponse(aiService.sendRequest(request));
+             if (classified.rejected()) return classified;
+-            return classified;
++            AiService.GreetingValidation validation = AiService.validateGreeting(classified.message(), introduce);
++            return validation.usable()
++                    ? new AiGreetingResult(validation.message(), false)
++                    : new AiGreetingResult(null, false);
+         } catch (Exception e) {
+             log.warn("51job AI请求失败，跳过当前岗位：{}", e.getMessage());
+             return new AiGreetingResult(null, false);
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index c0f9c35..838159e 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -1841,7 +1841,7 @@ public class Liepin {
+         if (message == null || message.isBlank() || message.contains("```") || message.contains("{{")) {
+             return false;
+         }
+-        return true;
++        return AiService.validateGreeting(message, introduce).usable();
+     }
+ 
+     private String currentCandidateIntroduce() {
+@@ -1952,7 +1952,10 @@ public class Liepin {
+                     if (attempt > 1) recordAiRetrySuccess();
+                     AiGreetingResult classified = classifyAiResponse(result);
+                     if (classified.rejected()) return classified;
+-                    return classified;
++                    AiService.GreetingValidation validation = AiService.validateGreeting(classified.message(), introduce);
++                    return validation.usable()
++                            ? new AiGreetingResult(validation.message(), false)
++                            : new AiGreetingResult(null, false);
+                 } catch (Exception e) {
+                     recordAiLatency(started);
+                     if (isAiTimeoutFailure(e)) {
+diff --git a/src/test/java/com/getjobs/application/service/AiPromptTest.java b/src/test/java/com/getjobs/application/service/AiPromptTest.java
+index 1ad8fe5..206c0cd 100644
+--- a/src/test/java/com/getjobs/application/service/AiPromptTest.java
++++ b/src/test/java/com/getjobs/application/service/AiPromptTest.java
+@@ -71,4 +71,41 @@ class AiPromptTest {
+         assertTrue(error.getMessage().contains("未提供"));
+     }
+ 
++    @Test
++    void acceptsGreetingWithTheRequiredPrefix() {
++        AiService.GreetingValidation result = AiService.validateGreeting(
++                "您好，我是应用物理学应届毕业生，熟悉放疗设备现场流程，期待与您沟通。",
++                "我叫测试用户，是应用物理学应届毕业生。");
++
++        assertTrue(result.usable());
++        assertEquals("您好，我是应用物理学应届毕业生，熟悉放疗设备现场流程，期待与您沟通。", result.message());
++    }
++
++    @Test
++    void rejectsCandidateNameAndWrongPrefix() {
++        AiService.GreetingValidation named = AiService.validateGreeting(
++                "您好，我是应用物理学应届毕业生，测试用户熟悉放疗设备现场流程。",
++                "我叫测试用户，是应用物理学应届毕业生。");
++        AiService.GreetingValidation wrongPrefix = AiService.validateGreeting(
++                "您好，我是应用物理学应届生，熟悉放疗设备现场流程。",
++                "我叫测试用户，是应用物理学应届毕业生。");
++
++        assertFalse(named.usable());
++        assertEquals("candidate_name", named.reason());
++        assertFalse(wrongPrefix.usable());
++        assertEquals("wrong_prefix", wrongPrefix.reason());
++    }
++
++    @Test
++    void normalizesMarkdownAndPreservesFalseRejection() {
++        AiService.GreetingValidation fenced = AiService.validateGreeting(
++                "```text\n您好，我是应用物理学应届毕业生，熟悉放疗设备现场流程。\n```",
++                "个人介绍");
++        AiService.GreetingValidation rejected = AiService.validateGreeting("false", "个人介绍");
++
++        assertTrue(fenced.usable());
++        assertEquals("您好，我是应用物理学应届毕业生，熟悉放疗设备现场流程。", fenced.message());
++        assertFalse(rejected.usable());
++        assertTrue(rejected.rejected());
++    }
+ }

@@ -1,0 +1,2 @@
+# Repository HEAD reference hashes; the worktree already contained unrelated changes before this fast change.
+# Modified-file snapshots for this change are under modified/ and are hashed in modified-hashes.txt.

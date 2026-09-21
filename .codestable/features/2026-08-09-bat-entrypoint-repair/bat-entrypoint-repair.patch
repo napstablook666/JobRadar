@@ -1,0 +1,86 @@
+diff --git a/restart.bat b/restart.bat
+index 679ef5b..79e386d 100644
+--- a/restart.bat
++++ b/restart.bat
+@@ -1,14 +1,24 @@
+ @echo off
+ setlocal EnableExtensions
+ cd /d "%~dp0"
++set "KEEP_OPEN=1"
++if defined GETJOBS_NO_PAUSE set "KEEP_OPEN=0"
+ set "GETJOBS_NO_PAUSE=1"
++echo [GetJobs] restarting from "%CD%"
+ 
+ call "%~dp0stop.bat" -Quiet
+ set "ERR=%ERRORLEVEL%"
+-if not "%ERR%"=="0" goto :done
++if not "%ERR%"=="0" goto :report
+ 
+ call "%~dp0start.bat" %*
+ set "ERR=%ERRORLEVEL%"
+ 
+-:done
++:report
++if "%ERR%"=="0" (
++  echo [GetJobs] restart completed successfully.
++) else (
++  echo [GetJobs] restart failed, exit code %ERR%.
++)
++if "%KEEP_OPEN%"=="1" pause
+ endlocal & exit /b %ERR%
++
+diff --git a/start.bat b/start.bat
+index 27f64be..5ff8cc0 100644
+--- a/start.bat
++++ b/start.bat
+@@ -1,7 +1,14 @@
+ @echo off
+ setlocal EnableExtensions
+ cd /d "%~dp0"
+-set "GETJOBS_NO_PAUSE=1"
+-powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0bin\start-services.ps1" %*
++set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
++if not exist "%PS_EXE%" set "PS_EXE=powershell.exe"
++echo [GetJobs] starting from "%CD%"
++"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0bin\start-services.ps1" %*
+ set "ERR=%ERRORLEVEL%"
++if not "%ERR%"=="0" (
++  echo.
++  echo [GetJobs] start failed, exit code %ERR%.
++  if not defined GETJOBS_NO_PAUSE pause
++)
+ endlocal & exit /b %ERR%
+diff --git a/stop.bat b/stop.bat
+index dee97cb..3f22636 100644
+--- a/stop.bat
++++ b/stop.bat
+@@ -1,6 +1,14 @@
+ @echo off
+ setlocal EnableExtensions
+ cd /d "%~dp0"
+-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0bin\stop-services.ps1" %*
++set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
++if not exist "%PS_EXE%" set "PS_EXE=powershell.exe"
++echo [GetJobs] stopping from "%CD%"
++"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0bin\stop-services.ps1" %*
+ set "ERR=%ERRORLEVEL%"
++if not "%ERR%"=="0" (
++  echo.
++  echo [GetJobs] stop failed, exit code %ERR%.
++  if not defined GETJOBS_NO_PAUSE pause
++)
+ endlocal & exit /b %ERR%
+diff --git "a/\350\277\233\345\272\246\347\231\275\346\235\277.md" "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+index 39ff615..d9a12d4 100644
+--- "a/\350\277\233\345\272\246\347\231\275\346\235\277.md"
++++ "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+@@ -230,3 +230,9 @@
+ 🔨 正在做：无 —— 本轮源码、测试和 CodeStable 产物已完成。
+ ⬜ 还没做：无。
+ ❓ 需要你决定：无。
++
++✅ 已完成：BAT 根入口可见化适配 —— 启动、停止、重启均显示执行目录、服务日志和退出结果，双击后保留可读反馈。
++✅ 已完成：BAT 三入口 CRLF 与参数回归 —— 兼容中文空格路径，保留 `-NoBrowser` 等启动参数和被脚本调用时的无暂停模式。
++🔨 正在做：无 —— 三个根目录 BAT 已完成实测。
++⬜ 还没做：无。
++❓ 需要你决定：无。

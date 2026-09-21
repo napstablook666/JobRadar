@@ -1,0 +1,1826 @@
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\front__app__liepin__analysis__AnalysisContent.tsx" "b/front\\app\\liepin\\analysis\\AnalysisContent.tsx"
+index c2f4b72..97d19df 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\front__app__liepin__analysis__AnalysisContent.tsx"
++++ "b/front\\app\\liepin\\analysis\\AnalysisContent.tsx"
+@@ -8,7 +8,7 @@ import { Select } from "@/components/ui/select"
+ import { Label } from "@/components/ui/label"
+ import PageHeader from "@/app/components/PageHeader"
+ import { ChartSurface } from "@/app/components/ChartSurface"
+-import { RefreshCw, Download, ChartBar, LineChart, PieChart, Briefcase, Trash2 } from "lucide-react"
++import { RefreshCw, Download, ChartBar, LineChart, PieChart, Briefcase, Trash2, Square } from "lucide-react"
+ import { parseSalary } from "@/lib/salary"
+ 
+ type NameValue = { name: string; value: number }
+@@ -83,6 +83,22 @@ type SuspendedRetryFeedback = {
+   success: boolean
+   message: string
+ }
++
++type TaskState = "IDLE" | "WAITING" | "RUNNING" | "STOPPING" | "PAUSED" | "COMPLETED" | "FAILED"
++
++type TaskSlotStatus = {
++  isRunning?: boolean
++  taskState?: TaskState
++  message?: string
++  batchRetry?: {
++    active?: boolean
++    round?: number
++    initialPending?: number
++    remaining?: number
++    delivered?: number
++    reason?: string
++  }
++}
+ // END feature: liepin-clear-pending-action
+ 
+ const API_BASE = "http://localhost:8888"
+@@ -142,10 +158,17 @@ export default function AnalysisContent({
+   const [loadingSuspendedRetrySummary, setLoadingSuspendedRetrySummary] = useState(false)
+   const [retryingSuspended, setRetryingSuspended] = useState(false)
+   const [suspendedRetryFeedback, setSuspendedRetryFeedback] = useState<SuspendedRetryFeedback | null>(null)
++  const [normalTaskStatus, setNormalTaskStatus] = useState<TaskSlotStatus>({ isRunning: deliveryRunning })
++  const [suspendedTaskStatus, setSuspendedTaskStatus] = useState<TaskSlotStatus>({ taskState: "IDLE", isRunning: false })
+   // END feature: liepin-clear-pending-action
+ 
+   const statusOptions = ["未投递", "已投递"]
+ 
++  const normalTaskRunning = Boolean(normalTaskStatus.isRunning ?? deliveryRunning)
++  const suspendedTaskRunning = Boolean(suspendedTaskStatus.isRunning)
++  const suspendedTaskState = suspendedTaskStatus.taskState || "IDLE"
++  const anyTaskRunning = normalTaskRunning || suspendedTaskRunning
++
+   useEffect(() => {
+     void loadStats()
+     void loadPendingSummary()
+@@ -274,6 +297,42 @@ export default function AnalysisContent({
+     }
+   }
+ 
++  const loadTaskStatus = async (): Promise<boolean> => {
++    try {
++      const res = await fetch(`${API_BASE}/api/liepin/status`)
++      const data = await res.json()
++      if (!res.ok || data.success === false) {
++        throw new Error(data.message || "读取猎聘任务状态失败")
++      }
++      const normalTask = data.normalTask || data
++      const suspendedTask = data.suspendedRetryTask || data.suspendedTask || {}
++      setNormalTaskStatus(normalTask)
++      setSuspendedTaskStatus(suspendedTask)
++      return Boolean(data.isAnyRunning || normalTask.isRunning || suspendedTask.isRunning)
++    } catch (e) {
++      console.error("fetch liepin task status failed", e)
++      return false
++    }
++  }
++
++  useEffect(() => {
++    let disposed = false
++    let timer: number | undefined
++
++    const poll = async () => {
++      const running = await loadTaskStatus()
++      if (disposed) return
++      timer = window.setTimeout(poll, running ? 1000 : 3000)
++    }
++
++    void poll()
++    return () => {
++      disposed = true
++      if (timer !== undefined) window.clearTimeout(timer)
++    }
++    // 任务状态在分析页生命周期内独立轮询
++  }, [])
++
+   const refreshAnalysis = async () => {
+     await Promise.all([
+       loadList(1, size),
+@@ -284,7 +343,7 @@ export default function AnalysisContent({
+   }
+ 
+   const handleOpenClearPending = async () => {
+-    if (deliveryRunning || loadingPendingSummary || clearingPending) return
++    if (anyTaskRunning || loadingPendingSummary || clearingPending) return
+     const summary = await loadPendingSummary()
+     if (!summary) return
+     if (summary.pending <= 0) {
+@@ -296,7 +355,7 @@ export default function AnalysisContent({
+   }
+ 
+   const handleClearPending = async () => {
+-    if (deliveryRunning || !pendingSummary || pendingSummary.pending <= 0) return
++    if (anyTaskRunning || !pendingSummary || pendingSummary.pending <= 0) return
+     try {
+       setClearingPending(true)
+       setClearPendingFeedback(null)
+@@ -321,7 +380,7 @@ export default function AnalysisContent({
+   }
+ 
+   const handleRetrySuspended = async () => {
+-    if (deliveryRunning || retryingSuspended || loadingSuspendedRetrySummary) return
++    if (suspendedTaskRunning || retryingSuspended || loadingSuspendedRetrySummary) return
+     const summary = await loadSuspendedRetrySummary()
+     if (!summary) return
+     if (summary.total <= 0) {
+@@ -348,6 +407,24 @@ export default function AnalysisContent({
+       setRetryingSuspended(false)
+     }
+   }
++
++  const handleStopSuspendedRetry = async () => {
++    if (!suspendedTaskRunning || suspendedTaskState === "STOPPING") return
++    try {
++      const res = await fetch(`${API_BASE}/api/liepin/retry-suspended-batch/stop`, { method: "POST" })
++      const data = await res.json()
++      if (!res.ok || data.success === false) {
++        throw new Error(data.message || "停止暂缓岗位批量重试失败")
++      }
++      setSuspendedTaskStatus((previous) => ({ ...previous, isRunning: true, taskState: "STOPPING" }))
++      setSuspendedRetryFeedback({ success: true, message: data.message || "暂缓岗位重试正在停止" })
++    } catch (e) {
++      setSuspendedRetryFeedback({
++        success: false,
++        message: e instanceof Error ? e.message : "停止暂缓岗位批量重试失败",
++      })
++    }
++  }
+   // END feature: liepin-clear-pending-action
+ 
+   useEffect(() => {
+@@ -685,8 +762,8 @@ export default function AnalysisContent({
+             <Button
+               variant="outline"
+               onClick={handleRetrySuspended}
+-              disabled={deliveryRunning || retryingSuspended || loadingSuspendedRetrySummary || !suspendedRetrySummary || suspendedRetrySummary.total === 0}
+-              title={deliveryRunning ? "投递任务运行中" : "仅重试已通过前置筛选、因 AI 或网络问题暂缓的岗位"}
++              disabled={suspendedTaskRunning || retryingSuspended || loadingSuspendedRetrySummary || !suspendedRetrySummary || suspendedRetrySummary.total === 0}
++              title={suspendedTaskRunning ? "暂缓岗位重试运行中" : "仅重试已通过前置筛选、因 AI 或网络问题暂缓的岗位"}
+               className="rounded-full border-amber-400 text-amber-700 hover:bg-amber-50"
+             >
+               <RefreshCw className="mr-1" />
+@@ -696,11 +773,22 @@ export default function AnalysisContent({
+                   ? "启动中..."
+                   : `一键批量重试暂缓岗位（${suspendedRetrySummary?.total ?? 0}）`}
+             </Button>
++            {suspendedTaskRunning && (
++              <Button
++                variant="destructive"
++                onClick={handleStopSuspendedRetry}
++                disabled={suspendedTaskState === "STOPPING"}
++                title="仅停止暂缓岗位重试，不影响普通投递"
++              >
++                <Square />
++                {suspendedTaskState === "STOPPING" ? "停止中..." : "停止暂缓重试"}
++              </Button>
++            )}
+             <Button
+               variant="destructive"
+               onClick={handleOpenClearPending}
+-              disabled={deliveryRunning || clearingPending || loadingPendingSummary || !pendingSummary || pendingSummary.pending === 0}
+-              title={deliveryRunning ? "投递任务运行中" : "清除全部未投递岗位"}
++              disabled={anyTaskRunning || clearingPending || loadingPendingSummary || !pendingSummary || pendingSummary.pending === 0}
++              title={anyTaskRunning ? "任务运行中" : "清除全部未投递岗位"}
+             >
+               <Trash2 />
+               {loadingPendingSummary ? "读取中..." : `清除未投递${pendingSummary ? `（${pendingSummary.pending}）` : ""}`}
+@@ -922,8 +1010,8 @@ export default function AnalysisContent({
+                     <p className="text-sm text-muted-foreground">
+                       分页投递进度和 AI 缓存保持不变。
+                     </p>
+-                    {deliveryRunning && (
+-                      <p className="text-sm text-amber-600">投递任务正在运行，请先停止任务。</p>
++                    {anyTaskRunning && (
++                      <p className="text-sm text-amber-600">猎聘任务正在运行，请先停止任务。</p>
+                     )}
+                     {clearPendingFeedback && !clearPendingFeedback.success && (
+                       <p className="text-sm text-red-600" role="alert">{clearPendingFeedback.message}</p>
+@@ -940,7 +1028,7 @@ export default function AnalysisContent({
+                       <Button
+                         variant="destructive"
+                         onClick={handleClearPending}
+-                        disabled={clearingPending || deliveryRunning || !pendingSummary || pendingSummary.pending === 0}
++                        disabled={clearingPending || anyTaskRunning || !pendingSummary || pendingSummary.pending === 0}
+                         className="rounded-full px-4"
+                       >
+                         {clearingPending ? "清理中..." : "确认清除"}
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\front__app__liepin__page.tsx" "b/front\\app\\liepin\\page.tsx"
+index 1d8a700..ec2d253 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\front__app__liepin__page.tsx"
++++ "b/front\\app\\liepin\\page.tsx"
+@@ -2,7 +2,7 @@
+ 
+ import { useState, useEffect, useRef } from 'react'
+ import { createSSEWithBackoff } from '@/lib/sse'
+-import { Search, Save, Target, Banknote, Play, Square, LogOut, Briefcase, Check, X } from 'lucide-react'
++import { Search, Save, Target, Banknote, Play, Square, LogOut, Briefcase, Check, X, RefreshCw } from 'lucide-react'
+ import { Button } from '@/components/ui/button'
+ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+ import { Input } from '@/components/ui/input'
+@@ -69,7 +69,7 @@ interface TaskStatusMessage {
+   timestamp?: number | null
+ }
+ 
+-type TaskState = 'IDLE' | 'RUNNING' | 'STOPPING' | 'PAUSED' | 'COMPLETED' | 'FAILED'
++type TaskState = 'IDLE' | 'WAITING' | 'RUNNING' | 'STOPPING' | 'PAUSED' | 'COMPLETED' | 'FAILED'
+ 
+ interface DeliverySummary {
+   scanned?: number
+@@ -204,9 +204,20 @@ export default function LiepinPage() {
+   const [aiSummary, setAiSummary] = useState<AiSummary>(EMPTY_AI_SUMMARY)
+   const [deliverySummary, setDeliverySummary] = useState<DeliverySummary>(EMPTY_DELIVERY_SUMMARY)
+   const [batchRetry, setBatchRetry] = useState<BatchRetryStatus>(EMPTY_BATCH_RETRY)
++  const [suspendedTaskState, setSuspendedTaskState] = useState<TaskState>('IDLE')
++  const [suspendedTaskMessage, setSuspendedTaskMessage] = useState('尚未启动暂缓岗位重试')
++  const [suspendedTaskMessageType, setSuspendedTaskMessageType] = useState('idle')
++  const [suspendedRecentMessages, setSuspendedRecentMessages] = useState<TaskStatusMessage[]>([
++    { type: 'idle', message: '尚未启动暂缓岗位重试' },
++  ])
++  const [suspendedBatchRetry, setSuspendedBatchRetry] = useState<BatchRetryStatus>(EMPTY_BATCH_RETRY)
++  const [suspendedPendingGreeting, setSuspendedPendingGreeting] = useState<PendingGreeting | null>(null)
++  const [suspendedRetrying, setSuspendedRetrying] = useState(false)
++  const [suspendedRetryCount, setSuspendedRetryCount] = useState(0)
+   const statusLogRef = useRef<HTMLDivElement>(null)
+   const activeRunIdRef = useRef(0)
+   const taskStateRef = useRef<TaskState>('IDLE')
++  const suspendedTaskStateRef = useRef<TaskState>('IDLE')
+   const [pendingGreeting, setPendingGreeting] = useState<PendingGreeting | null>(null)
+   const [pageProgress, setPageProgress] = useState<PageProgressItem[]>([])
+   const [resettingProgress, setResettingProgress] = useState(false)
+@@ -264,6 +275,7 @@ export default function LiepinPage() {
+       client.close()
+     }
+     // 配置只在页面首次加载时读取，避免状态更新触发重复请求。
++    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial page data fetch only
+   }, [])
+ 
+   const formatStatusTime = (timestamp?: number | null): string => {
+@@ -305,6 +317,18 @@ export default function LiepinPage() {
+     }
+   }
+ 
++  const refreshSuspendedRetrySummary = async () => {
++    try {
++      const response = await fetch('http://localhost:8888/api/liepin/retry-suspended-summary')
++      const data = await response.json()
++      if (!response.ok || data.success === false) throw new Error(data.message || '读取暂缓岗位统计失败')
++      setSuspendedRetryCount(Number(data.total) || 0)
++    } catch (error) {
++      console.warn('[猎聘] 获取暂缓岗位统计失败:', error)
++      setSuspendedRetryCount(0)
++    }
++  }
++
+   const fetchAllData = async () => {
+     try {
+       const response = await fetch('http://localhost:8888/api/liepin/config')
+@@ -357,6 +381,7 @@ export default function LiepinPage() {
+       } else {
+         setPageProgress([])
+       }
++      await refreshSuspendedRetrySummary()
+     } catch (error) {
+       console.error('Failed to fetch liepin data:', error)
+     } finally {
+@@ -409,40 +434,58 @@ export default function LiepinPage() {
+       if (!response.ok || !data.success) {
+         throw new Error(data.message || '状态接口返回异常')
+       }
+-      const responseRunId = Number(data.runId || 0)
+-      if (responseRunId < activeRunIdRef.current) {
+-        return data
+-      }
++      const normalTask = data.normalTask || data
++      const suspendedTask = data.suspendedRetryTask || data.suspendedTask || {}
++      const responseRunId = Number(normalTask.runId || 0)
+       if (responseRunId > activeRunIdRef.current) {
+         activeRunIdRef.current = responseRunId
+       }
+-      const nextTaskState = (data.taskState || 'IDLE') as TaskState
+-      const shouldRefreshPageProgress = !Boolean(data.isRunning)
++      const nextTaskState = (normalTask.taskState || 'IDLE') as TaskState
++      const nextSuspendedTaskState = (suspendedTask.taskState || 'IDLE') as TaskState
++      const previousSuspendedTaskState = suspendedTaskStateRef.current
++      const shouldRefreshPageProgress = !Boolean(normalTask.isRunning)
+         && ['PAUSED', 'COMPLETED', 'FAILED'].includes(nextTaskState)
+         && taskStateRef.current !== nextTaskState
+       taskStateRef.current = nextTaskState
+-      setIsDelivering(Boolean(data.isRunning))
++      suspendedTaskStateRef.current = nextSuspendedTaskState
++      setIsDelivering(Boolean(normalTask.isRunning))
+       setTaskState(nextTaskState)
+-      if (data.message) setTaskMessage(data.message)
+-      if (data.messageType) setTaskMessageType(data.messageType)
+-      const serverMessages = Array.isArray(data.recentMessages)
+-        ? data.recentMessages.filter((item: TaskStatusMessage) => item && typeof item.message === 'string')
++      if (normalTask.message) setTaskMessage(normalTask.message)
++      if (normalTask.messageType) setTaskMessageType(normalTask.messageType)
++      const serverMessages = Array.isArray(normalTask.recentMessages)
++        ? normalTask.recentMessages.filter((item: TaskStatusMessage) => item && typeof item.message === 'string')
+         : []
+       if (serverMessages.length > 0) {
+         setRecentTaskMessages(serverMessages.slice(-8))
+-      } else if (data.message) {
++      } else if (normalTask.message) {
+         setRecentTaskMessages([
+           {
+-            type: data.messageType || 'info',
+-            message: data.message,
+-            timestamp: data.messageAt,
++            type: normalTask.messageType || 'info',
++            message: normalTask.message,
++            timestamp: normalTask.messageAt,
+           },
+         ])
+       }
+-      setAiSummary({ ...EMPTY_AI_SUMMARY, ...(data.aiSummary || {}) })
+-      setDeliverySummary({ ...EMPTY_DELIVERY_SUMMARY, ...(data.deliverySummary || {}) })
+-      setBatchRetry({ ...EMPTY_BATCH_RETRY, ...(data.batchRetry || {}) })
+-      setPendingGreeting(data.pendingGreeting || null)
++      setAiSummary({ ...EMPTY_AI_SUMMARY, ...(normalTask.aiSummary || {}) })
++      setDeliverySummary({ ...EMPTY_DELIVERY_SUMMARY, ...(normalTask.deliverySummary || {}) })
++      setBatchRetry({ ...EMPTY_BATCH_RETRY, ...(normalTask.batchRetry || {}) })
++      setPendingGreeting(normalTask.pendingGreeting || null)
++      setSuspendedTaskState(nextSuspendedTaskState)
++      if (suspendedTask.message) setSuspendedTaskMessage(suspendedTask.message)
++      if (suspendedTask.messageType) setSuspendedTaskMessageType(suspendedTask.messageType)
++      const suspendedMessages = Array.isArray(suspendedTask.recentMessages)
++        ? suspendedTask.recentMessages.filter((item: TaskStatusMessage) => item && typeof item.message === 'string')
++        : []
++      if (suspendedMessages.length > 0) {
++        setSuspendedRecentMessages(suspendedMessages.slice(-8))
++      }
++      setSuspendedBatchRetry({ ...EMPTY_BATCH_RETRY, ...(suspendedTask.batchRetry || {}) })
++      setSuspendedPendingGreeting(suspendedTask.pendingGreeting || null)
++      if (!Boolean(suspendedTask.isRunning)
++        && ['PAUSED', 'COMPLETED', 'FAILED'].includes(nextSuspendedTaskState)
++        && previousSuspendedTaskState !== nextSuspendedTaskState) {
++        await refreshSuspendedRetrySummary()
++      }
+       if (shouldRefreshPageProgress) {
+         await refreshPageProgress()
+       }
+@@ -462,7 +505,11 @@ export default function LiepinPage() {
+     const poll = async () => {
+       const data = await refreshTaskStatus()
+       if (disposed) return
+-      timer = window.setTimeout(poll, data?.taskState === 'STOPPING' ? 250 : data?.isRunning ? 1000 : 3000)
++      const normalTask = data?.normalTask || data
++      const suspendedTask = data?.suspendedRetryTask || data?.suspendedTask
++      const anyRunning = Boolean(data?.isAnyRunning || normalTask?.isRunning || suspendedTask?.isRunning)
++      const stopping = normalTask?.taskState === 'STOPPING' || suspendedTask?.taskState === 'STOPPING'
++      timer = window.setTimeout(poll, stopping ? 250 : anyRunning ? 1000 : 3000)
+     }
+ 
+     poll()
+@@ -513,22 +560,36 @@ export default function LiepinPage() {
+     }
+   }
+ 
+-  const handleConfirmGreeting = async (action: 'ai' | 'preset' | 'skip') => {
+-    if (!pendingGreeting) return
++  const handleConfirmGreeting = async (
++    action: 'ai' | 'preset' | 'skip',
++    targetGreeting: PendingGreeting | null = pendingGreeting,
++  ) => {
++    if (!targetGreeting) return
+     try {
+       const response = await fetch('http://localhost:8888/api/liepin/confirm', {
+         method: 'POST',
+         headers: { 'Content-Type': 'application/json' },
+-        body: JSON.stringify({ jobId: pendingGreeting.jobId, action }),
++        body: JSON.stringify({ jobId: targetGreeting.jobId, action }),
+       })
+       const data = await response.json()
+-      setTaskMessage(data.message || (data.success ? '已确认，继续处理岗位。' : '确认失败。'))
+-      setTaskMessageType(data.success ? 'success' : 'error')
+-      if (data.success) setPendingGreeting(null)
++      if (targetGreeting === suspendedPendingGreeting) {
++        setSuspendedTaskMessage(data.message || (data.success ? '已确认，继续处理暂缓岗位。' : '确认失败。'))
++        setSuspendedTaskMessageType(data.success ? 'success' : 'error')
++        if (data.success) setSuspendedPendingGreeting(null)
++      } else {
++        setTaskMessage(data.message || (data.success ? '已确认，继续处理岗位。' : '确认失败。'))
++        setTaskMessageType(data.success ? 'success' : 'error')
++        if (data.success) setPendingGreeting(null)
++      }
+     } catch (error) {
+       console.error('[猎聘] 确认发送失败:', error)
+-      setTaskMessage('确认发送失败：网络或服务异常。')
+-      setTaskMessageType('error')
++      if (targetGreeting === suspendedPendingGreeting) {
++        setSuspendedTaskMessage('确认发送失败：网络或服务异常。')
++        setSuspendedTaskMessageType('error')
++      } else {
++        setTaskMessage('确认发送失败：网络或服务异常。')
++        setTaskMessageType('error')
++      }
+     }
+   }
+ 
+@@ -591,6 +652,51 @@ export default function LiepinPage() {
+     }
+   }
+ 
++  const handleStartSuspendedRetry = async () => {
++    if (suspendedRetrying || suspendedTaskState === 'WAITING' || suspendedTaskState === 'RUNNING' || suspendedTaskState === 'STOPPING') return
++    try {
++      setSuspendedRetrying(true)
++      setSuspendedTaskState('WAITING')
++      setSuspendedTaskMessage('正在启动暂缓岗位重试...')
++      setSuspendedTaskMessageType('info')
++      const response = await fetch('http://localhost:8888/api/liepin/retry-suspended-batch', { method: 'POST' })
++      const data = await response.json()
++      if (!response.ok || !data.success) {
++        throw new Error(data.message || '启动暂缓岗位重试失败')
++      }
++      setSuspendedTaskMessage(data.message || '暂缓岗位重试已启动。')
++      setSuspendedTaskMessageType('info')
++      await refreshTaskStatus()
++    } catch (error) {
++      console.error('[猎聘] 启动暂缓岗位重试失败:', error)
++      setSuspendedTaskState('FAILED')
++      setSuspendedTaskMessage(error instanceof Error ? error.message : '启动暂缓岗位重试失败')
++      setSuspendedTaskMessageType('error')
++    } finally {
++      setSuspendedRetrying(false)
++      await refreshSuspendedRetrySummary()
++    }
++  }
++
++  const handleStopSuspendedRetry = async () => {
++    try {
++      const response = await fetch('http://localhost:8888/api/liepin/retry-suspended-batch/stop', { method: 'POST' })
++      const data = await response.json()
++      if (data.success) {
++        setSuspendedTaskState('STOPPING')
++        setSuspendedTaskMessage(data.message || '正在停止暂缓岗位重试...')
++        setSuspendedTaskMessageType('info')
++      } else {
++        setSuspendedTaskMessage(data.message || '停止暂缓岗位重试失败。')
++        setSuspendedTaskMessageType('error')
++      }
++    } catch (error) {
++      console.error('[猎聘] 停止暂缓岗位重试失败:', error)
++      setSuspendedTaskMessage('停止暂缓岗位重试失败：网络或服务异常。')
++      setSuspendedTaskMessageType('error')
++    }
++  }
++
+   const triggerLogout = async () => {
+     try {
+       const response = await fetch('http://localhost:8888/api/liepin/logout', { method: 'POST' })
+@@ -699,6 +805,74 @@ export default function LiepinPage() {
+         </div>
+       </div>
+ 
++      <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-4 py-3">
++        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
++          <div>
++            <span className="text-sm font-medium text-amber-950">暂缓岗位批量重试</span>
++            <p className="mt-1 text-xs text-amber-800">与普通投递独立运行，共享浏览器和账户节奏控制。</p>
++          </div>
++          <div className="flex flex-wrap items-center gap-2">
++            {['WAITING', 'RUNNING', 'STOPPING'].includes(suspendedTaskState) ? (
++              <Button
++                onClick={handleStopSuspendedRetry}
++                disabled={suspendedTaskState === 'STOPPING'}
++                size="sm"
++                variant="destructive"
++              >
++                <Square className="mr-1" />
++                {suspendedTaskState === 'STOPPING' ? '停止中...' : '停止暂缓重试'}
++              </Button>
++            ) : (
++              <Button
++                onClick={handleStartSuspendedRetry}
++                disabled={!isLoggedIn || suspendedRetrying || suspendedRetryCount <= 0}
++                size="sm"
++                className="bg-amber-600 text-white hover:bg-amber-700"
++              >
++                <RefreshCw className="mr-1" />
++                {suspendedRetrying ? '启动中...' : `开始重试（${suspendedRetryCount}）`}
++              </Button>
++            )}
++          </div>
++        </div>
++        <div className="grid grid-cols-2 gap-2 text-xs text-amber-950 sm:grid-cols-5">
++          <span>状态 {suspendedTaskState}</span>
++          <span>轮次 {suspendedBatchRetry.round ?? 0}</span>
++          <span>初始 {suspendedBatchRetry.initialPending ?? suspendedRetryCount}</span>
++          <span>剩余 {suspendedBatchRetry.remaining ?? suspendedRetryCount}</span>
++          <span>成功聊天 {suspendedBatchRetry.delivered ?? 0}</span>
++        </div>
++        <div
++          className={`mt-2 rounded-md border px-3 py-2 text-sm ${
++            suspendedTaskMessageType === 'error'
++              ? 'border-red-200 bg-red-50 text-red-700'
++              : suspendedTaskMessageType === 'success'
++                ? 'border-green-200 bg-green-50 text-green-700'
++                : 'border-amber-200 bg-white/70 text-amber-900'
++          }`}
++          role="status"
++        >
++          {suspendedTaskMessage}
++        </div>
++        <div className="mt-2 max-h-48 space-y-1 overflow-y-auto pr-1" role="log" aria-live="polite" aria-label="暂缓岗位重试运行记录">
++          {suspendedRecentMessages.map((item, index) => (
++            <div
++              key={`${item.timestamp ?? 'suspended-local'}-${index}`}
++              className={`flex items-start gap-2 rounded-md border px-2.5 py-2 text-sm ${statusRowClass(item.type)}`}
++            >
++              <span className="shrink-0 font-mono text-[11px] opacity-70">{formatStatusTime(item.timestamp)}</span>
++              <span className="shrink-0 text-[11px] font-medium">{statusTypeLabel(item.type)}</span>
++              <span className="min-w-0 flex-1 break-words">
++                {item.message}
++                {item.current != null && item.total != null && (
++                  <span className="ml-1 text-xs opacity-75">({item.current}/{item.total})</span>
++                )}
++              </span>
++            </div>
++          ))}
++        </div>
++      </div>
++
+       <div className="rounded-lg border border-cyan-200 bg-cyan-50/60 px-4 py-3">
+         <div className="mb-2 flex items-center justify-between gap-3">
+           <span className="text-sm font-medium text-cyan-950">本轮岗位筛选</span>
+@@ -775,6 +949,43 @@ export default function LiepinPage() {
+         </Card>
+       )}
+ 
++      {suspendedPendingGreeting && (
++        <Card className="border-orange-300 bg-orange-50/60">
++          <CardHeader className="pb-3">
++            <CardTitle className="flex items-center gap-2 text-base">
++              <RefreshCw className="text-orange-600" />
++              暂缓岗位待确认发送
++            </CardTitle>
++            <CardDescription>
++              {suspendedPendingGreeting.companyName} · {suspendedPendingGreeting.jobTitle} · {suspendedPendingGreeting.salary || '薪资未标明'}
++            </CardDescription>
++          </CardHeader>
++          <CardContent className="space-y-3">
++            <div className="rounded-md border border-orange-200 bg-white px-3 py-2 text-sm whitespace-pre-wrap">
++              {suspendedPendingGreeting.message}
++            </div>
++            {suspendedPendingGreeting.jd && (
++              <div className="max-h-32 overflow-y-auto rounded-md border border-orange-200 bg-white px-3 py-2 text-xs text-muted-foreground">
++                {suspendedPendingGreeting.jd}
++              </div>
++            )}
++            <div className="flex flex-wrap gap-2">
++              {suspendedPendingGreeting.aiAvailable && (
++                <Button onClick={() => handleConfirmGreeting('ai', suspendedPendingGreeting)} size="sm" className="bg-emerald-600 text-white hover:bg-emerald-700">
++                  <Check className="mr-1" />确认发送 AI 话术
++                </Button>
++              )}
++              <Button onClick={() => handleConfirmGreeting('preset', suspendedPendingGreeting)} size="sm" variant="outline">
++                <Check className="mr-1" />发送预设语
++              </Button>
++              <Button onClick={() => handleConfirmGreeting('skip', suspendedPendingGreeting)} size="sm" variant="ghost">
++                <X className="mr-1" />跳过
++              </Button>
++            </div>
++          </CardContent>
++        </Card>
++      )}
++
+       <div className="space-y-6 mt-6">
+         {/* 平台说明 */}
+         <Card className="animate-in fade-in slide-in-from-bottom-5 duration-700">
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__application__controller__LiepinController.java" "b/src\\main\\java\\com\\getjobs\\application\\controller\\LiepinController.java"
+index 41a8a86..e27e56d 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__application__controller__LiepinController.java"
++++ "b/src\\main\\java\\com\\getjobs\\application\\controller\\LiepinController.java"
+@@ -187,17 +187,17 @@ public class LiepinController {
+                     log.info("[{}] {}", progressMessage.getPlatform(), progressMessage.getMessage()));
+             if (!started) {
+                 response.put("success", false);
+-                response.put("message", liepinJobService.isRunning()
+-                        ? "猎聘任务正在运行，请等待当前任务结束"
++                response.put("message", liepinJobService.isSuspendedRetryRunning()
++                        ? "暂缓岗位重试正在运行，请等待当前任务结束"
+                         : "当前没有筛选后暂缓岗位");
+-                response.put("status", liepinJobService.isRunning() ? "running" : "empty");
++                response.put("status", liepinJobService.isSuspendedRetryRunning() ? "running" : "empty");
+                 return ResponseEntity.badRequest().body(response);
+             }
+             response.put("success", true);
+             response.put("message", "筛选后暂缓岗位批量重试已启动");
+             response.put("status", "started");
+-            response.put("runId", liepinJobService.getRunId());
+-            response.put("initialSuspended", liepinJobService.getBatchRetryInitialPending());
++            response.put("runId", liepinJobService.getSuspendedRetryRunId());
++            response.put("initialSuspended", liepinJobService.getSuspendedRetryInitialPending());
+             return ResponseEntity.ok(response);
+         } catch (Exception e) {
+             log.error("启动筛选后暂缓岗位批量重试失败", e);
+@@ -238,6 +238,30 @@ public class LiepinController {
+         }
+     }
+ 
++    /** 停止暂缓岗位批量重试，不影响普通投递任务。 */
++    @PostMapping("/retry-suspended-batch/stop")
++    public ResponseEntity<Map<String, Object>> stopSuspendedRetry() {
++        Map<String, Object> response = new HashMap<>();
++        try {
++            if (!liepinJobService.isSuspendedRetryRunning()) {
++                response.put("success", false);
++                response.put("message", "没有正在运行的暂缓岗位重试任务");
++                response.put("status", "idle");
++                return ResponseEntity.badRequest().body(response);
++            }
++            liepinJobService.stopSuspendedRetry();
++            response.put("success", true);
++            response.put("message", "暂缓岗位重试停止请求已发送");
++            response.put("status", "stopping");
++            return ResponseEntity.ok(response);
++        } catch (Exception e) {
++            log.error("停止猎聘暂缓岗位重试失败", e);
++            response.put("success", false);
++            response.put("message", "停止暂缓岗位重试失败: " + e.getMessage());
++            return ResponseEntity.internalServerError().body(response);
++        }
++    }
++
+     /** 确认当前待处理岗位的发送动作。 */
+     @PostMapping("/confirm")
+     public ResponseEntity<Map<String, Object>> confirmGreeting(@RequestBody Map<String, Object> requestBody) {
+@@ -440,9 +464,9 @@ public class LiepinController {
+     @DeleteMapping("/pending")
+     public ResponseEntity<Map<String, Object>> clearPending() {
+         Map<String, Object> response = new HashMap<>();
+-        if (liepinJobService.isRunning()) {
++        if (liepinJobService.isAnyTaskRunning()) {
+             response.put("success", false);
+-            response.put("message", "投递任务正在运行，请先停止任务后再清理");
++            response.put("message", "猎聘任务正在运行，请先停止任务后再清理");
+             return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+         }
+ 
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__worker__liepin__Liepin.java" "b/src\\main\\java\\com\\getjobs\\worker\\liepin\\Liepin.java"
+index 1270151..4720fd3 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__worker__liepin__Liepin.java"
++++ "b/src\\main\\java\\com\\getjobs\\worker\\liepin\\Liepin.java"
+@@ -92,6 +92,8 @@ public class Liepin {
+     private int salarySkippedCount;
+     private LiepinRateGuard rateGuard;
+     @Setter
++    private LiepinAccountPacing accountPacing;
++    @Setter
+     private LiepinConfig config;
+     @Getter
+     private Date startDate;
+@@ -274,7 +276,8 @@ public class Liepin {
+             this.rateGuard = LiepinRateGuard.production(
+                     this::shouldStop,
+                     this::info,
+-                    config
++                    config,
++                    accountPacing
+             );
+         }
+         notifyStatsChanged();
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__worker__liepin__LiepinRateGuard.java" "b/src\\main\\java\\com\\getjobs\\worker\\liepin\\LiepinRateGuard.java"
+index 09b6932..f38b404 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__worker__liepin__LiepinRateGuard.java"
++++ "b/src\\main\\java\\com\\getjobs\\worker\\liepin\\LiepinRateGuard.java"
+@@ -49,14 +49,22 @@ final class LiepinRateGuard {
+     private final DelayRange sendRange;
+     private final int batchSize;
+     private final DelayRange batchCooldownRange;
+-    private long lastActivityAt = -1L;
+-    private int successfulSendCount;
++    private final LiepinAccountPacing accountPacing;
+     private boolean stopped;
+ 
+     static LiepinRateGuard production(
+             Supplier<Boolean> shouldStop,
+             Consumer<String> info,
+             LiepinConfig config
++    ) {
++        return production(shouldStop, info, config, new LiepinAccountPacing());
++    }
++
++    static LiepinRateGuard production(
++            Supplier<Boolean> shouldStop,
++            Consumer<String> info,
++            LiepinConfig config,
++            LiepinAccountPacing accountPacing
+     ) {
+         return new LiepinRateGuard(
+                 shouldStop,
+@@ -69,7 +77,8 @@ final class LiepinRateGuard {
+                 new DelayRange(config.effectiveDetailMinDelaySeconds(), config.effectiveDetailMaxDelaySeconds()),
+                 new DelayRange(config.effectiveMinDelaySeconds(), config.effectiveMaxDelaySeconds()),
+                 config.effectiveRateGuardBatchSize(),
+-                new DelayRange(config.effectiveBatchCooldownMinSeconds(), config.effectiveBatchCooldownMaxSeconds())
++                new DelayRange(config.effectiveBatchCooldownMinSeconds(), config.effectiveBatchCooldownMaxSeconds()),
++                accountPacing
+         );
+     }
+ 
+@@ -92,7 +101,8 @@ final class LiepinRateGuard {
+                 new DelayRange(8, 15),
+                 sendRange,
+                 5,
+-                new DelayRange(300, 450)
++                new DelayRange(300, 450),
++                new LiepinAccountPacing()
+         );
+     }
+ 
+@@ -108,6 +118,36 @@ final class LiepinRateGuard {
+             DelayRange sendRange,
+             int batchSize,
+             DelayRange batchCooldownRange
++    ) {
++        this(
++                shouldStop,
++                info,
++                clock,
++                sleeper,
++                randomSeconds,
++                searchRange,
++                pageRange,
++                detailRange,
++                sendRange,
++                batchSize,
++                batchCooldownRange,
++                new LiepinAccountPacing()
++        );
++    }
++
++    LiepinRateGuard(
++            Supplier<Boolean> shouldStop,
++            Consumer<String> info,
++            LongSupplier clock,
++            Sleeper sleeper,
++            IntBinaryOperator randomSeconds,
++            DelayRange searchRange,
++            DelayRange pageRange,
++            DelayRange detailRange,
++            DelayRange sendRange,
++            int batchSize,
++            DelayRange batchCooldownRange,
++            LiepinAccountPacing accountPacing
+     ) {
+         this.shouldStop = shouldStop;
+         this.info = info;
+@@ -120,6 +160,7 @@ final class LiepinRateGuard {
+         this.sendRange = sendRange;
+         this.batchSize = batchSize;
+         this.batchCooldownRange = batchCooldownRange;
++        this.accountPacing = accountPacing == null ? new LiepinAccountPacing() : accountPacing;
+     }
+ 
+     boolean before(Action action) {
+@@ -131,14 +172,14 @@ final class LiepinRateGuard {
+ 
+     void completed(Action action) {
+         if (isActive()) {
+-            lastActivityAt = clock.getAsLong();
++            accountPacing.recordActivity(clock.getAsLong());
+         }
+     }
+ 
+     boolean afterSuccessfulSend(boolean hasRemainingWork) {
+-        successfulSendCount++;
++        int successfulSendCount = accountPacing.incrementSuccessfulSendCount();
+         if (!hasRemainingWork || successfulSendCount % batchSize != 0) return isActive();
+-        lastActivityAt = clock.getAsLong();
++        accountPacing.recordActivity(clock.getAsLong());
+         boolean cooled = waitFor("完成" + batchSize + "次发送后的批次冷却", batchCooldownRange);
+         if (cooled) info.accept("批次冷却完成，继续处理后续岗位");
+         return cooled && isActive();
+@@ -166,14 +207,14 @@ final class LiepinRateGuard {
+         if (!isActive()) return false;
+         int delaySeconds = randomSeconds.applyAsInt(range.minSeconds, range.maxSeconds);
+         long now = clock.getAsLong();
+-        if (lastActivityAt < 0) {
+-            lastActivityAt = now;
++        if (accountPacing.lastActivityAt() < 0) {
++            accountPacing.recordActivity(now);
+             return true;
+         }
+ 
+-        long remaining = lastActivityAt + delaySeconds * 1000L - now;
++        long remaining = accountPacing.lastActivityAt() + delaySeconds * 1000L - now;
+         if (remaining <= 0) {
+-            lastActivityAt = now;
++            accountPacing.recordActivity(now);
+             info.accept(String.format("节奏控制：%s间隔已满足，无需额外等待", label));
+             return true;
+         }
+@@ -189,10 +230,10 @@ final class LiepinRateGuard {
+                 info.accept("等待节奏间隔时收到停止信号");
+                 return false;
+             }
+-            remaining = lastActivityAt + delaySeconds * 1000L - clock.getAsLong();
++            remaining = accountPacing.lastActivityAt() + delaySeconds * 1000L - clock.getAsLong();
+         }
+         if (!isActive()) return false;
+-        lastActivityAt = clock.getAsLong();
++        accountPacing.recordActivity(clock.getAsLong());
+         info.accept(String.format("节奏控制：%s等待结束，继续处理", label));
+         return true;
+     }
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__worker__service__LiepinJobService.java" "b/src\\main\\java\\com\\getjobs\\worker\\service\\LiepinJobService.java"
+index e9c8ff6..932cc24 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__main__java__com__getjobs__worker__service__LiepinJobService.java"
++++ "b/src\\main\\java\\com\\getjobs\\worker\\service\\LiepinJobService.java"
+@@ -4,6 +4,7 @@ import com.getjobs.application.service.ConfigService;
+ import com.getjobs.application.service.LiepinService;
+ import com.getjobs.worker.dto.JobProgressMessage;
+ import com.getjobs.worker.liepin.Liepin;
++import com.getjobs.worker.liepin.LiepinAccountPacing;
+ import com.getjobs.worker.liepin.LiepinConfig;
+ import com.getjobs.worker.manager.PlaywrightManager;
+ import com.getjobs.worker.manager.ReadRequestStatus;
+@@ -12,6 +13,8 @@ import jakarta.annotation.PreDestroy;
+ import lombok.RequiredArgsConstructor;
+ import lombok.extern.slf4j.Slf4j;
+ import org.springframework.beans.factory.ObjectProvider;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.beans.factory.annotation.Qualifier;
+ import org.springframework.stereotype.Service;
+ 
+ import java.util.ArrayDeque;
+@@ -23,7 +26,10 @@ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ForkJoinPool;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.function.Consumer;
+ 
+ /**
+@@ -41,6 +47,7 @@ public class LiepinJobService implements JobPlatformService {
+ 
+     public enum TaskState {
+         IDLE,
++        WAITING,
+         RUNNING,
+         STOPPING,
+         PAUSED,
+@@ -66,6 +73,10 @@ public class LiepinJobService implements JobPlatformService {
+     private final ObjectProvider<Liepin> liepinProvider;
+     private final LiepinService liepinService;
+ 
++    @Autowired
++    @Qualifier("deliveryExecutor")
++    private java.util.concurrent.Executor deliveryExecutor = ForkJoinPool.commonPool();
++
+     // 运行状态标志
+     private volatile boolean isRunning = false;
+ 
+@@ -98,6 +109,10 @@ public class LiepinJobService implements JobPlatformService {
+     private volatile int batchRetryDelivered = 0;
+     private volatile String batchRetryReason = "";
+     private volatile Set<Long> pendingRetryJobIds = Set.of();
++    private final LiepinAccountPacing accountPacing = new LiepinAccountPacing();
++    private final AtomicInteger activeTaskLeases = new AtomicInteger();
++    private final AtomicBoolean taskLeaseHeld = new AtomicBoolean();
++    private final SuspendedRetryRun suspendedRetry = new SuspendedRetryRun();
+ 
+     private static Map<String, Object> emptyDeliverySummary() {
+         return Map.of(
+@@ -163,6 +178,34 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    /** 暂缓重试独立任务槽，避免普通投递收尾覆盖它的状态。 */
++    private final class SuspendedRetryRun {
++        private volatile boolean isRunning;
++        private volatile TaskState taskState = TaskState.IDLE;
++        private volatile long runId;
++        private volatile int lastDeliveredCount;
++        private volatile Map<String, Object> deliverySummary = emptyDeliverySummary();
++        private volatile ReadRequestStatus lastReadRequestStatus =
++                ReadRequestStatus.browser(false, "尚未读取猎聘搜索");
++        private volatile boolean shouldStop;
++        private volatile String lastMessage = "尚未启动暂缓岗位重试";
++        private volatile String lastMessageType = "idle";
++        private volatile long lastMessageAt = System.currentTimeMillis();
++        private final StatusHistory recentStatus = new StatusHistory(RECENT_MESSAGE_LIMIT);
++        private final Object pendingLock = new Object();
++        private volatile Liepin.GreetingRequest pendingGreeting;
++        private volatile CompletableFuture<Liepin.GreetingAction> pendingDecision;
++        private volatile Consumer<JobProgressMessage> activeProgressCallback;
++        private volatile Map<String, Object> aiSummary = emptyAiSummary();
++        private volatile int batchRetryRound;
++        private volatile int batchRetryInitialPending;
++        private volatile int batchRetryRemaining;
++        private volatile int batchRetryDelivered;
++        private volatile String batchRetryReason = "";
++        private volatile Set<Long> pendingRetryJobIds = Set.of();
++        private final AtomicBoolean leaseHeld = new AtomicBoolean();
++    }
++
+     static JobProgressMessage buildCompletionMessage(int deliveredCount) {
+         return buildCompletionMessage(deliveredCount, Map.of());
+     }
+@@ -267,8 +310,15 @@ public class LiepinJobService implements JobPlatformService {
+         if (!claimRun(progressCallback, mode, initialPending, retryJobIds)) {
+             return false;
+         }
+-        CompletableFuture.runAsync(() -> runClaimed(progressCallback));
+-        return true;
++        try {
++            deliveryExecutor.execute(() -> runClaimed(progressCallback));
++            return true;
++        } catch (RuntimeException e) {
++            taskState = TaskState.FAILED;
++            finishRun();
++            publish(progressCallback, JobProgressMessage.error(PLATFORM, "提交投递任务失败: " + e.getMessage()));
++            return false;
++        }
+     }
+ 
+     /** 重新跑保留页，专门处理上一轮耗尽自动重试的 AI 超时岗位。 */
+@@ -291,19 +341,22 @@ public class LiepinJobService implements JobPlatformService {
+ 
+     /** 连续处理启动时快照的筛选后暂缓岗位，只包含 AI 或网络异常保留的记录。 */
+     public boolean retrySuspendedBatchAsync(Consumer<JobProgressMessage> progressCallback) {
+-        if (isRunning) {
+-            return false;
+-        }
+         List<Long> suspendedIds = liepinService.listSuspendedRetryJobIds();
+         if (suspendedIds.isEmpty()) {
+             return false;
+         }
+-        return startDeliveryAsync(
+-                progressCallback,
+-                RetryMode.SUSPENDED_BATCH,
+-                suspendedIds.size(),
+-                new HashSet<>(suspendedIds)
+-        );
++        if (!claimSuspendedRetryRun(progressCallback, new HashSet<>(suspendedIds))) {
++            return false;
++        }
++        try {
++            deliveryExecutor.execute(() -> runSuspendedRetryClaimed(progressCallback));
++            return true;
++        } catch (RuntimeException e) {
++            suspendedRetry.taskState = TaskState.FAILED;
++            finishSuspendedRetryRun();
++            publish(suspendedRetry, JobProgressMessage.error(PLATFORM, "提交暂缓岗位重试失败: " + e.getMessage()));
++            return false;
++        }
+     }
+ 
+     private synchronized boolean claimRun(Consumer<JobProgressMessage> progressCallback) {
+@@ -318,12 +371,12 @@ public class LiepinJobService implements JobPlatformService {
+     private synchronized boolean claimRun(Consumer<JobProgressMessage> progressCallback,
+                                           RetryMode mode, int initialPending,
+                                           Set<Long> retryJobIds) {
+-        if (isRunning) {
++        if (isRunning || !acquireTaskLease()) {
+             return false;
+         }
+         isRunning = true;
+         runId++;
+-        taskState = TaskState.RUNNING;
++        taskState = TaskState.WAITING;
+         shouldStop = false;
+         activeProgressCallback = progressCallback;
+         aiSummary = emptyAiSummary();
+@@ -352,9 +405,45 @@ public class LiepinJobService implements JobPlatformService {
+         return true;
+     }
+ 
++    private synchronized boolean claimSuspendedRetryRun(
++            Consumer<JobProgressMessage> progressCallback,
++            Set<Long> retryJobIds
++    ) {
++        if (suspendedRetry.isRunning || !acquireSuspendedTaskLease()) {
++            return false;
++        }
++        suspendedRetry.isRunning = true;
++        suspendedRetry.runId++;
++        suspendedRetry.taskState = TaskState.WAITING;
++        suspendedRetry.shouldStop = false;
++        suspendedRetry.lastDeliveredCount = 0;
++        suspendedRetry.lastReadRequestStatus = ReadRequestStatus.browser(false, "尚未读取猎聘搜索");
++        suspendedRetry.deliverySummary = emptyDeliverySummary();
++        suspendedRetry.aiSummary = emptyAiSummary();
++        suspendedRetry.batchRetryRound = 0;
++        suspendedRetry.batchRetryInitialPending = retryJobIds.size();
++        suspendedRetry.batchRetryRemaining = retryJobIds.size();
++        suspendedRetry.batchRetryDelivered = 0;
++        suspendedRetry.batchRetryReason = "";
++        suspendedRetry.pendingRetryJobIds = new HashSet<>(retryJobIds);
++        suspendedRetry.activeProgressCallback = progressCallback;
++        suspendedRetry.recentStatus.clear();
++        publish(suspendedRetry, JobProgressMessage.info(PLATFORM, "正在初始化暂缓岗位重试..."));
++        return true;
++    }
++
+     private void runClaimed(Consumer<JobProgressMessage> progressCallback) {
+         try {
+-            playwrightManager.withPlaywrightAccess(() -> executeDeliveryInternal(progressCallback));
++            publish(progressCallback, JobProgressMessage.info(PLATFORM, "正在等待猎聘浏览器资源..."));
++            boolean acquired = playwrightManager.withPlatformAccessCancellable(PLATFORM,
++                    this::shouldStop,
++                    () -> executeDeliveryInternal(progressCallback)
++            );
++            if (!acquired) {
++                taskState = TaskState.PAUSED;
++                publish(progressCallback, buildPausedMessage(lastDeliveredCount));
++                finishRun();
++            }
+         } catch (Exception e) {
+             log.error("猎聘投递任务访问浏览器失败", e);
+             taskState = TaskState.FAILED;
+@@ -363,6 +452,156 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private void runSuspendedRetryClaimed(Consumer<JobProgressMessage> progressCallback) {
++        try {
++            publish(suspendedRetry, JobProgressMessage.info(PLATFORM, "正在等待猎聘浏览器资源..."));
++            boolean acquired = playwrightManager.withPlatformAccessCancellable(PLATFORM,
++                    () -> suspendedRetry.shouldStop,
++                    () -> executeSuspendedRetryInternal(progressCallback)
++            );
++            if (!acquired) {
++                suspendedRetry.taskState = TaskState.PAUSED;
++                publish(suspendedRetry, buildSuspendedBatchRetryPausedMessage(
++                        suspendedRetry.batchRetryDelivered,
++                        suspendedRetry.batchRetryRemaining,
++                        "收到停止指令"));
++                finishSuspendedRetryRun();
++            }
++        } catch (Exception e) {
++            log.error("猎聘暂缓岗位重试访问浏览器失败", e);
++            suspendedRetry.taskState = TaskState.FAILED;
++            publish(suspendedRetry, JobProgressMessage.error(PLATFORM, "暂缓岗位重试失败: " + e.getMessage()));
++            finishSuspendedRetryRun();
++        }
++    }
++
++    /** 两个任务槽共享登录监控租约；浏览器页面本身仍由 Playwright 临界区串行保护。 */
++    private synchronized boolean acquireTaskLease() {
++        if (taskLeaseHeld.get()) {
++            return true;
++        }
++        int previous = activeTaskLeases.getAndIncrement();
++        taskLeaseHeld.set(true);
++        if (previous == 0) {
++            try {
++                playwrightManager.pauseLiepinMonitoring();
++            } catch (Exception e) {
++                log.warn("暂停猎聘登录监控失败: {}", e.getMessage());
++            }
++        }
++        return true;
++    }
++
++    private synchronized boolean acquireSuspendedTaskLease() {
++        if (suspendedRetry.leaseHeld.get()) {
++            return true;
++        }
++        int previous = activeTaskLeases.getAndIncrement();
++        suspendedRetry.leaseHeld.set(true);
++        if (previous == 0) {
++            try {
++                playwrightManager.pauseLiepinMonitoring();
++            } catch (Exception e) {
++                log.warn("暂停猎聘登录监控失败: {}", e.getMessage());
++            }
++        }
++        return true;
++    }
++
++    private synchronized void releaseTaskLease() {
++        if (taskLeaseHeld.compareAndSet(true, false)) {
++            int remaining = activeTaskLeases.updateAndGet(current -> Math.max(0, current - 1));
++            if (remaining == 0) {
++                resumeLiepinMonitoringAfterLeaseRelease();
++            }
++            synchronized (lifecycleMonitor) {
++                lifecycleMonitor.notifyAll();
++            }
++        }
++    }
++
++    private synchronized void releaseSuspendedTaskLease() {
++        if (suspendedRetry.leaseHeld.compareAndSet(true, false)) {
++            int remaining = activeTaskLeases.updateAndGet(current -> Math.max(0, current - 1));
++            if (remaining == 0) {
++                resumeLiepinMonitoringAfterLeaseRelease();
++            }
++            synchronized (lifecycleMonitor) {
++                lifecycleMonitor.notifyAll();
++            }
++        }
++    }
++
++    private void resumeLiepinMonitoringAfterLeaseRelease() {
++        try {
++            playwrightManager.resumeLiepinMonitoring();
++        } catch (Exception e) {
++            log.warn("恢复猎聘登录监控失败: {}", e.getMessage());
++        }
++    }
++
++    private boolean hasActiveTask() {
++        return isRunning || suspendedRetry.isRunning;
++    }
++
++    private void executeSuspendedRetryInternal(Consumer<JobProgressMessage> progressCallback) {
++        Liepin liepin = null;
++        try {
++            Page page = playwrightManager.ensureLiepinPageReady();
++            if (page == null) {
++                suspendedRetry.taskState = TaskState.FAILED;
++                publish(suspendedRetry, JobProgressMessage.error(PLATFORM, "猎聘页面未初始化"));
++                return;
++            }
++            if (!playwrightManager.isLoggedIn(PLATFORM)) {
++                suspendedRetry.taskState = TaskState.FAILED;
++                publish(suspendedRetry, JobProgressMessage.error(PLATFORM, "请先登录猎聘"));
++                return;
++            }
++
++            playwrightManager.pauseLiepinMonitoring();
++            LiepinConfig config = configService.getLiepinConfig();
++            publish(suspendedRetry, JobProgressMessage.info(PLATFORM, "配置加载成功"));
++            publish(suspendedRetry, JobProgressMessage.info(PLATFORM, "开始暂缓岗位重试..."));
++
++            Liepin.ProgressCallback callback = (message, current, total) -> {
++                if (current != null && total != null) {
++                    publish(suspendedRetry, JobProgressMessage.progress(PLATFORM, message, current, total));
++                } else {
++                    publish(suspendedRetry, JobProgressMessage.info(PLATFORM, message));
++                }
++            };
++
++            liepin = liepinProvider.getObject();
++            liepin.setPage(page);
++            liepin.setConfig(config);
++            liepin.setAccountPacing(accountPacing);
++            liepin.setProgressCallback(callback);
++            liepin.setShouldStopCallback(this::shouldStopSuspendedRetry);
++            liepin.setGreetingConfirmation(this::awaitSuspendedGreetingConfirmation);
++            liepin.setPageRecovery(playwrightManager::ensureLiepinPageReady);
++            liepin.setPendingRetryJobIds(suspendedRetry.pendingRetryJobIds);
++            Liepin activeLiepin = liepin;
++            liepin.setStatsChangedCallback(() -> refreshSuspendedRetryStats(activeLiepin));
++
++            executeSuspendedBatchRetryRounds(progressCallback, liepin, suspendedRetry);
++        } catch (Liepin.PageLifecycleException e) {
++            log.error("猎聘暂缓岗位重试因页面生命周期中断", e);
++            suspendedRetry.taskState = TaskState.FAILED;
++            String message = e.sideEffectStarted()
++                    ? "浏览器页面在发送过程中失效，发送结果不确定，暂缓重试已暂停，请检查后重试"
++                    : "猎聘页面已失效，暂缓重试已暂停，请重新启动";
++            publish(suspendedRetry, JobProgressMessage.error(PLATFORM, message));
++        } catch (Exception e) {
++            log.error("猎聘暂缓岗位重试执行失败", e);
++            suspendedRetry.taskState = TaskState.FAILED;
++            publish(suspendedRetry, JobProgressMessage.error(PLATFORM, "暂缓岗位重试失败: " + e.getMessage()));
++        } finally {
++            refreshSuspendedRetryStats(liepin);
++            finishSuspendedRetryRun();
++        }
++    }
++
+     private void executeDeliveryInternal(Consumer<JobProgressMessage> progressCallback) {
+         Liepin liepin = null;
+         try {
+@@ -400,6 +639,7 @@ public class LiepinJobService implements JobPlatformService {
+             liepin = liepinProvider.getObject();
+             liepin.setPage(page);
+             liepin.setConfig(config);
++            liepin.setAccountPacing(accountPacing);
+             liepin.setProgressCallback(cb);
+             liepin.setShouldStopCallback(this::shouldStop);
+             liepin.setGreetingConfirmation(this::awaitGreetingConfirmation);
+@@ -588,6 +828,70 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private void executeSuspendedBatchRetryRounds(Consumer<JobProgressMessage> progressCallback,
++                                                  Liepin liepin,
++                                                  SuspendedRetryRun state) {
++        int previousPending = state.batchRetryInitialPending;
++        int totalDelivered = 0;
++
++        while (true) {
++            if (state.shouldStop) {
++                state.batchRetryReason = "收到停止指令";
++                state.taskState = TaskState.PAUSED;
++                publish(state, buildSuspendedBatchRetryPausedMessage(
++                        totalDelivered, state.batchRetryRemaining, state.batchRetryReason));
++                return;
++            }
++            if (previousPending == 0) {
++                state.taskState = TaskState.COMPLETED;
++                state.batchRetryReason = "已清空筛选后暂缓岗位";
++                publish(state, buildSuspendedBatchRetryCompletionMessage(
++                        totalDelivered, state.batchRetryRound));
++                return;
++            }
++
++            state.batchRetryRound++;
++            publish(state, JobProgressMessage.info(PLATFORM,
++                    String.format("开始筛选后暂缓岗位批量重试第%d轮，当前待处理%d个",
++                            state.batchRetryRound, previousPending)));
++
++            Liepin.ExecutionResult result = liepin.execute();
++            totalDelivered += result.deliveredCount();
++            state.batchRetryDelivered = totalDelivered;
++            state.lastDeliveredCount = totalDelivered;
++            refreshSuspendedRetryStats(liepin);
++
++            int currentPending = liepin.getPendingRetryRemaining();
++            state.batchRetryRemaining = currentPending;
++            BatchRetryAction action = decideBatchRetry(previousPending, currentPending, result.outcome());
++            if (action == BatchRetryAction.COMPLETE) {
++                state.taskState = TaskState.COMPLETED;
++                state.batchRetryReason = "已清空筛选后暂缓岗位";
++                publish(state, buildSuspendedBatchRetryCompletionMessage(
++                        totalDelivered, state.batchRetryRound));
++                return;
++            }
++            if (action == BatchRetryAction.PAUSE) {
++                state.batchRetryReason = result.outcome() == Liepin.ExecutionOutcome.RATE_LIMITED
++                        ? result.detail()
++                        : currentPending >= previousPending
++                        ? "本轮待处理数量没有下降"
++                        : "任务已暂停";
++                state.taskState = TaskState.PAUSED;
++                if (result.outcome() == Liepin.ExecutionOutcome.RATE_LIMITED) {
++                    publish(state, JobProgressMessage.error(PLATFORM,
++                            String.format("筛选后暂缓岗位批量重试因平台风控或节奏中断，剩余%d个，累计发起%d个聊天：%s",
++                                    currentPending, totalDelivered, state.batchRetryReason)));
++                } else {
++                    publish(state, buildSuspendedBatchRetryPausedMessage(
++                            totalDelivered, currentPending, state.batchRetryReason));
++                }
++                return;
++            }
++            previousPending = currentPending;
++        }
++    }
++
+     private boolean waitForBatchRetryDelay(int delaySeconds) {
+         long deadline = System.currentTimeMillis() + delaySeconds * 1000L;
+         while (System.currentTimeMillis() < deadline) {
+@@ -621,17 +925,42 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private void refreshSuspendedRetryStats(Liepin liepin) {
++        if (liepin == null) {
++            return;
++        }
++        try {
++            suspendedRetry.aiSummary = liepin.getAiSummary();
++            suspendedRetry.deliverySummary = liepin.getDeliverySummary();
++            ReadRequestStatus currentReadRequestStatus = liepin.getReadRequestStatus();
++            if (currentReadRequestStatus != null) {
++                suspendedRetry.lastReadRequestStatus = currentReadRequestStatus;
++            }
++        } catch (RuntimeException e) {
++            log.warn("读取猎聘暂缓重试统计失败: {}", e.getMessage());
++        }
++    }
++
+     private void finishRun() {
+         cancelPendingGreeting();
+         isRunning = false;
+         shouldStop = false;
+         activeProgressCallback = null;
++        releaseTaskLease();
++        synchronized (lifecycleMonitor) {
++            lifecycleMonitor.notifyAll();
++        }
++    }
++
++    private void finishSuspendedRetryRun() {
++        cancelPendingGreeting(suspendedRetry);
++        suspendedRetry.isRunning = false;
++        suspendedRetry.shouldStop = false;
++        suspendedRetry.activeProgressCallback = null;
++        releaseSuspendedTaskLease();
+         synchronized (lifecycleMonitor) {
+             lifecycleMonitor.notifyAll();
+         }
+-        try {
+-            playwrightManager.resumeLiepinMonitoring();
+-        } catch (Exception ignored) {}
+     }
+ 
+     /**
+@@ -648,9 +977,10 @@ public class LiepinJobService implements JobPlatformService {
+     /** 请求停止并等待后台任务收尾，供关闭钩子和停止脚本使用。 */
+     boolean stopAndAwait(long timeoutMillis) {
+         stopDelivery();
++        stopSuspendedRetry();
+         long deadline = System.currentTimeMillis() + Math.max(0L, timeoutMillis);
+         synchronized (lifecycleMonitor) {
+-            while (isRunning) {
++            while (hasActiveTask()) {
+                 long remaining = deadline - System.currentTimeMillis();
+                 if (remaining <= 0L) {
+                     break;
+@@ -663,7 +993,7 @@ public class LiepinJobService implements JobPlatformService {
+                 }
+             }
+         }
+-        return !isRunning;
++        return !hasActiveTask();
+     }
+ 
+     @Override
+@@ -682,61 +1012,114 @@ public class LiepinJobService implements JobPlatformService {
+         publish(activeProgressCallback, JobProgressMessage.info(PLATFORM, "正在暂停投递任务..."));
+     }
+ 
++    /** 仅停止暂缓岗位重试槽，不影响普通投递任务。 */
++    public synchronized boolean stopSuspendedRetry() {
++        if (!suspendedRetry.isRunning) {
++            return false;
++        }
++        if (suspendedRetry.taskState == TaskState.STOPPING) {
++            return true;
++        }
++        log.info("收到停止猎聘暂缓岗位重试请求");
++        suspendedRetry.taskState = TaskState.STOPPING;
++        suspendedRetry.shouldStop = true;
++        cancelPendingGreeting(suspendedRetry);
++        publish(suspendedRetry, JobProgressMessage.info(PLATFORM, "正在暂停暂缓岗位重试..."));
++        return true;
++    }
++
+     /**
+      * 获取任务状态
+      */
+     @Override
+     public Map<String, Object> getStatus() {
+-        Map<String, Object> status = new HashMap<>();
+-        status.put("platform", PLATFORM);
+-        status.put("runId", runId);
+-        status.put("isRunning", isRunning);
+-        status.put("taskState", taskState.name());
+-        status.put("lastDeliveredCount", lastDeliveredCount);
+-        status.put("retryMode", retryMode.name());
++        Map<String, Object> normalTask = buildTaskStatus(false);
++        Map<String, Object> suspendedTask = buildTaskStatus(true);
++        Map<String, Object> status = new HashMap<>(normalTask);
++        // 顶层字段保持普通投递的旧契约；双任务详情使用独立槽位。
++        status.put("normalTask", normalTask);
++        status.put("suspendedRetryTask", suspendedTask);
++        status.put("suspendedTask", suspendedTask);
++        status.put("isAnyRunning", hasActiveTask());
++        status.put("activeTaskLeases", activeTaskLeases.get());
++        return status;
++    }
++
++    private Map<String, Object> buildTaskStatus(boolean suspendedView) {
++        boolean running = suspendedView ? suspendedRetry.isRunning : isRunning;
++        long currentRunId = suspendedView ? suspendedRetry.runId : runId;
++        TaskState currentTaskState = suspendedView ? suspendedRetry.taskState : taskState;
++        int currentDelivered = suspendedView ? suspendedRetry.lastDeliveredCount : lastDeliveredCount;
++        RetryMode currentRetryMode = suspendedView ? RetryMode.SUSPENDED_BATCH : retryMode;
++        int currentRound = suspendedView ? suspendedRetry.batchRetryRound : batchRetryRound;
++        int currentInitialPending = suspendedView
++                ? suspendedRetry.batchRetryInitialPending : batchRetryInitialPending;
++        int currentRemaining = suspendedView ? suspendedRetry.batchRetryRemaining : batchRetryRemaining;
++        int currentBatchDelivered = suspendedView
++                ? suspendedRetry.batchRetryDelivered : batchRetryDelivered;
++        String currentRetryReason = suspendedView ? suspendedRetry.batchRetryReason : batchRetryReason;
++        Map<String, Object> currentAiSummary = suspendedView ? suspendedRetry.aiSummary : aiSummary;
++        Map<String, Object> currentDeliverySummary = suspendedView
++                ? suspendedRetry.deliverySummary : deliverySummary;
++        ReadRequestStatus currentReadRequest = suspendedView
++                ? suspendedRetry.lastReadRequestStatus : lastReadRequestStatus;
++        String currentMessage = suspendedView ? suspendedRetry.lastMessage : lastMessage;
++        String currentMessageType = suspendedView ? suspendedRetry.lastMessageType : lastMessageType;
++        long currentMessageAt = suspendedView ? suspendedRetry.lastMessageAt : lastMessageAt;
++
++        Map<String, Object> result = new HashMap<>();
++        result.put("platform", PLATFORM);
++        result.put("runId", currentRunId);
++        result.put("isRunning", running);
++        result.put("taskState", currentTaskState.name());
++        result.put("lastDeliveredCount", currentDelivered);
++        result.put("retryMode", currentRetryMode.name());
+         Map<String, Object> batchRetry = new HashMap<>();
+-        batchRetry.put("active", isRunning
+-                && (retryMode == RetryMode.AI_BATCH || retryMode == RetryMode.SUSPENDED_BATCH));
+-        batchRetry.put("scope", retryMode == RetryMode.SUSPENDED_BATCH ? "SUSPENDED" :
+-                retryMode == RetryMode.AI_BATCH ? "AI_TIMEOUT" : "NONE");
+-        batchRetry.put("round", batchRetryRound);
+-        batchRetry.put("initialPending", batchRetryInitialPending);
+-        batchRetry.put("remaining", batchRetryRemaining);
+-        batchRetry.put("delivered", batchRetryDelivered);
+-        batchRetry.put("reason", batchRetryReason);
+-        status.put("batchRetry", batchRetry);
+-        status.put("resumeAvailable", taskState == TaskState.PAUSED || taskState == TaskState.FAILED
+-                || number(aiSummary, "aiRetryable") > 0
+-                || (retryMode == RetryMode.SUSPENDED_BATCH && batchRetryRemaining > 0));
+-        status.put("isLoggedIn", playwrightManager.isLoggedIn(PLATFORM));
+-        status.put("message", lastMessage);
+-        status.put("messageType", lastMessageType);
+-        status.put("messageAt", lastMessageAt);
+-        List<JobProgressMessage> recentMessages = recentStatus.snapshot();
++        batchRetry.put("active", running && (currentRetryMode == RetryMode.AI_BATCH
++                || currentRetryMode == RetryMode.SUSPENDED_BATCH));
++        batchRetry.put("scope", currentRetryMode == RetryMode.SUSPENDED_BATCH ? "SUSPENDED"
++                : currentRetryMode == RetryMode.AI_BATCH ? "AI_TIMEOUT" : "NONE");
++        batchRetry.put("round", currentRound);
++        batchRetry.put("initialPending", currentInitialPending);
++        batchRetry.put("remaining", currentRemaining);
++        batchRetry.put("delivered", currentBatchDelivered);
++        batchRetry.put("reason", currentRetryReason);
++        result.put("batchRetry", batchRetry);
++        result.put("resumeAvailable", currentTaskState == TaskState.PAUSED
++                || currentTaskState == TaskState.FAILED
++                || number(currentAiSummary, "aiRetryable") > 0
++                || (currentRetryMode == RetryMode.SUSPENDED_BATCH && currentRemaining > 0));
++        result.put("isLoggedIn", playwrightManager.isLoggedIn(PLATFORM));
++        result.put("message", currentMessage);
++        result.put("messageType", currentMessageType);
++        result.put("messageAt", currentMessageAt);
++        List<JobProgressMessage> recentMessages = suspendedView
++                ? suspendedRetry.recentStatus.snapshot() : recentStatus.snapshot();
+         if (recentMessages.isEmpty()) {
+             recentMessages = List.of(new JobProgressMessage(
+-                    PLATFORM, lastMessageType, lastMessage, null, null, lastMessageAt));
+-        }
+-        status.put("recentMessages", recentMessages);
+-        status.put("aiSummary", aiSummary);
+-        status.put("deliverySummary", deliverySummary);
+-        status.put("readRequest", lastReadRequestStatus.asMap());
+-        Liepin.GreetingRequest pending = pendingGreeting;
+-        if (pending != null) {
+-            Map<String, Object> pendingData = new HashMap<>();
+-            pendingData.put("jobId", pending.jobId());
+-            pendingData.put("companyName", pending.companyName());
+-            pendingData.put("jobTitle", pending.jobTitle());
+-            pendingData.put("salary", pending.salary());
+-            pendingData.put("jd", pending.jd());
+-            pendingData.put("message", pending.message());
+-            pendingData.put("aiAvailable", pending.aiAvailable());
+-            pendingData.put("source", pending.aiAvailable() ? "ai" : "preset");
+-            status.put("pendingGreeting", pendingData);
+-        } else {
+-            status.put("pendingGreeting", null);
++                    PLATFORM, currentMessageType, currentMessage, null, null, currentMessageAt));
+         }
+-        return status;
++        result.put("recentMessages", recentMessages);
++        result.put("aiSummary", currentAiSummary);
++        result.put("deliverySummary", currentDeliverySummary);
++        result.put("readRequest", currentReadRequest.asMap());
++        Liepin.GreetingRequest pending = suspendedView
++                ? suspendedRetry.pendingGreeting : pendingGreeting;
++        result.put("pendingGreeting", pending == null ? null : greetingData(pending));
++        return result;
++    }
++
++    private Map<String, Object> greetingData(Liepin.GreetingRequest pending) {
++        Map<String, Object> data = new HashMap<>();
++        data.put("jobId", pending.jobId());
++        data.put("companyName", pending.companyName());
++        data.put("jobTitle", pending.jobTitle());
++        data.put("salary", pending.salary());
++        data.put("jd", pending.jd());
++        data.put("message", pending.message());
++        data.put("aiAvailable", pending.aiAvailable());
++        data.put("source", pending.aiAvailable() ? "ai" : "preset");
++        return data;
+     }
+ 
+     /** 等待页面对当前岗位的最终发送确认。 */
+@@ -770,6 +1153,36 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private Liepin.GreetingAction awaitSuspendedGreetingConfirmation(Liepin.GreetingRequest request) {
++        if (request == null || suspendedRetry.shouldStop) return Liepin.GreetingAction.SKIP;
++
++        CompletableFuture<Liepin.GreetingAction> decision = new CompletableFuture<>();
++        synchronized (suspendedRetry.pendingLock) {
++            if (suspendedRetry.pendingDecision != null) {
++                log.warn("已有待确认暂缓岗位，跳过新的 job_id={}", request.jobId());
++                return Liepin.GreetingAction.SKIP;
++            }
++            suspendedRetry.pendingGreeting = request;
++            suspendedRetry.pendingDecision = decision;
++        }
++        publish(suspendedRetry, JobProgressMessage.info(PLATFORM,
++                String.format("等待确认暂缓岗位【%s】【%s】的%s", request.companyName(), request.jobTitle(),
++                        request.aiAvailable() ? "AI话术" : "猎聘预设语")));
++        try {
++            return decision.get(10, TimeUnit.MINUTES);
++        } catch (Exception e) {
++            log.warn("猎聘暂缓岗位确认等待结束: {}", e.getMessage());
++            return Liepin.GreetingAction.SKIP;
++        } finally {
++            synchronized (suspendedRetry.pendingLock) {
++                if (suspendedRetry.pendingDecision == decision) {
++                    suspendedRetry.pendingDecision = null;
++                    suspendedRetry.pendingGreeting = null;
++                }
++            }
++        }
++    }
++
+     public ConfirmationResult confirmGreeting(Long jobId, String action) {
+         Liepin.GreetingAction greetingAction = switch (action == null ? "" : action.trim().toLowerCase()) {
+             case "ai", "send_ai" -> Liepin.GreetingAction.SEND_AI;
+@@ -781,6 +1194,12 @@ public class LiepinJobService implements JobPlatformService {
+             return new ConfirmationResult(false, "确认动作无效");
+         }
+ 
++        if (suspendedRetry.pendingGreeting != null
++                && jobId != null
++                && jobId.equals(suspendedRetry.pendingGreeting.jobId())) {
++            return confirmGreeting(suspendedRetry, jobId, greetingAction);
++        }
++
+         synchronized (pendingLock) {
+             if (pendingGreeting == null || pendingDecision == null) {
+                 return new ConfirmationResult(false, "当前没有待确认岗位");
+@@ -796,6 +1215,26 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private ConfirmationResult confirmGreeting(
++            SuspendedRetryRun run,
++            Long jobId,
++            Liepin.GreetingAction greetingAction
++    ) {
++        synchronized (run.pendingLock) {
++            if (run.pendingGreeting == null || run.pendingDecision == null) {
++                return new ConfirmationResult(false, "当前没有待确认岗位");
++            }
++            if (jobId == null || !jobId.equals(run.pendingGreeting.jobId())) {
++                return new ConfirmationResult(false, "待确认岗位已变化，请刷新页面");
++            }
++            if (greetingAction == Liepin.GreetingAction.SEND_AI && !run.pendingGreeting.aiAvailable()) {
++                return new ConfirmationResult(false, "当前岗位没有可用AI话术");
++            }
++            boolean accepted = run.pendingDecision.complete(greetingAction);
++            return new ConfirmationResult(accepted, accepted ? "已记录确认动作" : "确认动作已处理");
++        }
++    }
++
+     private void cancelPendingGreeting() {
+         CompletableFuture<Liepin.GreetingAction> decision = pendingDecision;
+         if (decision != null) {
+@@ -803,6 +1242,13 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private void cancelPendingGreeting(SuspendedRetryRun run) {
++        CompletableFuture<Liepin.GreetingAction> decision = run.pendingDecision;
++        if (decision != null) {
++            decision.complete(Liepin.GreetingAction.SKIP);
++        }
++    }
++
+     private void publish(Consumer<JobProgressMessage> progressCallback, JobProgressMessage message) {
+         if (message == null) {
+             return;
+@@ -819,6 +1265,22 @@ public class LiepinJobService implements JobPlatformService {
+         }
+     }
+ 
++    private void publish(SuspendedRetryRun run, JobProgressMessage message) {
++        if (message == null) {
++            return;
++        }
++        if (message.getTimestamp() == null) {
++            message.setTimestamp(System.currentTimeMillis());
++        }
++        run.lastMessage = message.getMessage();
++        run.lastMessageType = message.getType();
++        run.lastMessageAt = message.getTimestamp();
++        run.recentStatus.add(message);
++        if (run.activeProgressCallback != null) {
++            run.activeProgressCallback.accept(message);
++        }
++    }
++
+     @Override
+     public String getPlatformName() {
+         return PLATFORM;
+@@ -829,6 +1291,15 @@ public class LiepinJobService implements JobPlatformService {
+         return isRunning;
+     }
+ 
++    /** 普通投递和暂缓重试任一任务槽运行时为 true。 */
++    public boolean isAnyTaskRunning() {
++        return hasActiveTask();
++    }
++
++    public boolean isSuspendedRetryRunning() {
++        return suspendedRetry.isRunning;
++    }
++
+     public long getRunId() {
+         return runId;
+     }
+@@ -837,9 +1308,21 @@ public class LiepinJobService implements JobPlatformService {
+         return batchRetryInitialPending;
+     }
+ 
++    public long getSuspendedRetryRunId() {
++        return suspendedRetry.runId;
++    }
++
++    public int getSuspendedRetryInitialPending() {
++        return suspendedRetry.batchRetryInitialPending;
++    }
++
+     public boolean shouldStop() {
+         return shouldStop;
+     }
+ 
++    private boolean shouldStopSuspendedRetry() {
++        return suspendedRetry.shouldStop;
++    }
++
+     
+ }
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__test__java__com__getjobs__application__controller__LiepinControllerPendingCleanupTest.java" "b/src\\test\\java\\com\\getjobs\\application\\controller\\LiepinControllerPendingCleanupTest.java"
+index e327e3b..5ff64ec 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__test__java__com__getjobs__application__controller__LiepinControllerPendingCleanupTest.java"
++++ "b/src\\test\\java\\com\\getjobs\\application\\controller\\LiepinControllerPendingCleanupTest.java"
+@@ -39,6 +39,7 @@ class LiepinControllerPendingCleanupTest {
+     @Test
+     void runningDeliveryReturnsConflictWithoutDeleting() {
+         when(jobService.isRunning()).thenReturn(true);
++        when(jobService.isAnyTaskRunning()).thenReturn(true);
+ 
+         ResponseEntity<Map<String, Object>> response = controller.clearPending();
+ 
+@@ -93,8 +94,8 @@ class LiepinControllerPendingCleanupTest {
+     void suspendedBatchRetryEndpointStartsFromQualifiedFailureSnapshot() {
+         when(playwrightManager.isLoggedIn("liepin")).thenReturn(true);
+         when(jobService.retrySuspendedBatchAsync(any())).thenReturn(true);
+-        when(jobService.getRunId()).thenReturn(8L);
+-        when(jobService.getBatchRetryInitialPending()).thenReturn(2120);
++        when(jobService.getSuspendedRetryRunId()).thenReturn(8L);
++        when(jobService.getSuspendedRetryInitialPending()).thenReturn(2120);
+ 
+         ResponseEntity<Map<String, Object>> response = controller.retrySuspendedBatch();
+ 
+@@ -105,6 +106,43 @@ class LiepinControllerPendingCleanupTest {
+         assertEquals(2120, response.getBody().get("initialSuspended"));
+     }
+ 
++    @Test
++    void suspendedRetryCanStartWhileNormalDeliveryIsRunning() {
++        when(playwrightManager.isLoggedIn("liepin")).thenReturn(true);
++        when(jobService.isRunning()).thenReturn(true);
++        when(jobService.isSuspendedRetryRunning()).thenReturn(false);
++        when(jobService.retrySuspendedBatchAsync(any())).thenReturn(true);
++        when(jobService.getSuspendedRetryRunId()).thenReturn(9L);
++        when(jobService.getSuspendedRetryInitialPending()).thenReturn(4);
++
++        ResponseEntity<Map<String, Object>> response = controller.retrySuspendedBatch();
++
++        assertEquals(HttpStatus.OK, response.getStatusCode());
++        assertTrue((Boolean) response.getBody().get("success"));
++        assertEquals(9L, response.getBody().get("runId"));
++    }
++
++    @Test
++    void stoppingSuspendedRetryDoesNotRequireNormalDeliveryToStop() {
++        when(jobService.isSuspendedRetryRunning()).thenReturn(true);
++
++        ResponseEntity<Map<String, Object>> response = controller.stopSuspendedRetry();
++
++        assertEquals(HttpStatus.OK, response.getStatusCode());
++        assertTrue((Boolean) response.getBody().get("success"));
++        verify(jobService).stopSuspendedRetry();
++    }
++
++    @Test
++    void cleanupChecksBothTaskSlots() {
++        when(jobService.isAnyTaskRunning()).thenReturn(true);
++
++        ResponseEntity<Map<String, Object>> response = controller.clearPending();
++
++        assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
++        verify(liepinService, org.mockito.Mockito.never()).clearPendingSnapshots();
++    }
++
+     @Test
+     void suspendedRetrySummaryOnlyUsesTheQualifiedFailureQueue() {
+         when(liepinService.getSuspendedRetrySummary())
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__test__java__com__getjobs__worker__service__LiepinJobServiceDeliveryTest.java" "b/src\\test\\java\\com\\getjobs\\worker\\service\\LiepinJobServiceDeliveryTest.java"
+index 1f4dd39..8c89bf3 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\baseline\\src__test__java__com__getjobs__worker__service__LiepinJobServiceDeliveryTest.java"
++++ "b/src\\test\\java\\com\\getjobs\\worker\\service\\LiepinJobServiceDeliveryTest.java"
+@@ -8,6 +8,8 @@ import com.getjobs.worker.manager.PlaywrightManager;
+ import org.junit.jupiter.api.Test;
+ import org.springframework.beans.factory.ObjectProvider;
+ 
++import java.lang.reflect.Field;
++import java.util.concurrent.CompletableFuture;
+ import java.util.List;
+ import java.util.Map;
+ 
+@@ -170,4 +172,77 @@ class LiepinJobServiceDeliveryTest {
+                 LiepinJobService.buildSuspendedBatchRetryPausedMessage(1, 3, "本轮待处理数量没有下降")
+                         .getMessage().contains("剩余3个"));
+     }
++
++    @Test
++    void statusKeepsNormalAndSuspendedTaskSlotsSeparate() throws Exception {
++        PlaywrightManager playwrightManager = mock(PlaywrightManager.class);
++        when(playwrightManager.isLoggedIn("liepin")).thenReturn(false);
++        LiepinJobService service = new LiepinJobService(
++                playwrightManager,
++                mock(ConfigService.class),
++                mock(ObjectProvider.class),
++                mock(LiepinService.class)
++        );
++
++        setField(service, "isRunning", true);
++        setField(service, "runId", 11L);
++        setField(service, "taskState", LiepinJobService.TaskState.RUNNING);
++
++        Object suspended = readField(service, "suspendedRetry");
++        setField(suspended, "isRunning", true);
++        setField(suspended, "runId", 22L);
++        setField(suspended, "taskState", LiepinJobService.TaskState.PAUSED);
++
++        Map<String, Object> status = service.getStatus();
++
++        assertEquals(11L, status.get("runId"));
++        assertEquals(11L, ((Map<?, ?>) status.get("normalTask")).get("runId"));
++        assertEquals(22L, ((Map<?, ?>) status.get("suspendedRetryTask")).get("runId"));
++        assertEquals(true, status.get("isAnyRunning"));
++        assertEquals("PAUSED", ((Map<?, ?>) status.get("suspendedRetryTask")).get("taskState"));
++    }
++
++    @Test
++    void confirmationRoutesToTheMatchingTaskSlot() throws Exception {
++        LiepinJobService service = new LiepinJobService(
++                mock(PlaywrightManager.class),
++                mock(ConfigService.class),
++                mock(ObjectProvider.class),
++                mock(LiepinService.class)
++        );
++        Liepin.GreetingRequest normalRequest = new Liepin.GreetingRequest(
++                101L, "普通公司", "普通岗位", "10K", "jd", "message", true);
++        Liepin.GreetingRequest suspendedRequest = new Liepin.GreetingRequest(
++                202L, "暂缓公司", "暂缓岗位", "10K", "jd", "message", true);
++        CompletableFuture<Liepin.GreetingAction> normalDecision = new CompletableFuture<>();
++        CompletableFuture<Liepin.GreetingAction> suspendedDecision = new CompletableFuture<>();
++        setField(service, "pendingGreeting", normalRequest);
++        setField(service, "pendingDecision", normalDecision);
++        Object suspended = readField(service, "suspendedRetry");
++        setField(suspended, "pendingGreeting", suspendedRequest);
++        setField(suspended, "pendingDecision", suspendedDecision);
++
++        assertEquals(true, service.confirmGreeting(202L, "ai").accepted());
++        assertEquals(Liepin.GreetingAction.SEND_AI, suspendedDecision.getNow(null));
++        assertEquals(true, service.confirmGreeting(101L, "ai").accepted());
++        assertEquals(Liepin.GreetingAction.SEND_AI, normalDecision.getNow(null));
++    }
++
++    private static Object readField(Object target, String name) throws Exception {
++        Field field = target.getClass().getDeclaredField(name);
++        field.setAccessible(true);
++        return field.get(target);
++    }
++
++    private static void setField(Object target, String name, Object value) throws Exception {
++        Field field = target.getClass().getDeclaredField(name);
++        field.setAccessible(true);
++        if (value instanceof Long longValue) {
++            field.setLong(target, longValue);
++        } else if (value instanceof Boolean booleanValue) {
++            field.setBoolean(target, booleanValue);
++        } else {
++            field.set(target, value);
++        }
++    }
+ }
+diff --git "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\\350\277\233\345\272\246\347\231\275\346\235\277.md.baseline" "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+index c9e5e78..1cd73b0 100644
+--- "a/.codestable\\features\\2026-08-08-liepin-parallel-tasks\\\350\277\233\345\272\246\347\231\275\346\235\277.md.baseline"
++++ "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+@@ -162,3 +162,11 @@
+ 🔨 正在做：运行态加载 —— 源码已编译验证，当前 8888 仍是旧后端实例，尚未打断现有服务重载。
+ ⬜ 还没做：重载新后端后检查 `/api/playwright/status` 的 `deliveryRuntime`、四个平台运行时状态和后台无窗口进程；需要扫码时再做 visible-login 回归。
+ ❓ 需要你决定：无；下一次允许服务重载时按已确认配置加载。
++
++✅ 已完成：猎聘双任务槽并行 —— 普通投递与筛选后暂缓岗位批量重试各自维护运行、停止、确认、统计、日志和待处理岗位状态，可同时启动。
++✅ 已完成：猎聘双槽前端控制 —— 配置页显示暂缓任务的独立启动/停止、轮次、剩余数、日志和确认卡；分析页在普通投递运行时保留暂缓重试入口，清理动作检查两个任务槽。
++✅ 已完成：双槽状态契约收敛 —— `/api/liepin/status` 保留普通投递旧顶层字段，并提供 `normalTask`、`suspendedRetryTask`、`isAnyRunning`；旧实例响应仍可由前端兼容读取。
++✅ 已完成：本轮代码验证 —— 前端 `pnpm lint`、`pnpm build`、Java 猎聘定向测试和 `git diff --check` 均通过。
++🔨 正在做：运行态加载 —— 当前 8888 普通投递仍在执行，源码新版本等待自然收尾后再重载。
++⬜ 还没做：新后端重载后的双任务真实并行小批复测。
++❓ 需要你决定：无；重载前保持当前运行任务和端口状态。

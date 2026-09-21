@@ -1,0 +1,70 @@
+{
+  "capturedAt": "2026-08-08T15:55:31.7544188+08:00",
+  "runId": 1,
+  "taskState": "COMPLETED",
+  "lastDeliveredCount": 1,
+  "deliverySummary": {
+    "scanned": 82,
+    "salaryEligible": 69,
+    "salarySkipped": 13,
+    "otherSkipped": 0,
+    "delivered": 1,
+    "skipReasons": {
+      "已有会话": 15,
+      "非月薪岗位": 13,
+      "没有可用聊一聊按钮": 2,
+      "AI评分未达阈值": 48
+    }
+  },
+  "aiSummary": {
+    "candidateCount": 52,
+    "cacheHits": 34,
+    "screenCalls": 4,
+    "messageCalls": 1,
+    "passed": 1,
+    "review": 3,
+    "skipped": 48,
+    "invalid": 0,
+    "invalidResults": 0,
+    "aiTimeouts": 0,
+    "buttonFailures": 0,
+    "confirmationFailures": 0,
+    "aiRetryAttempts": 0,
+    "aiRetrySuccesses": 0,
+    "aiRetryable": 0,
+    "avgLatencyMs": 9470
+  },
+  "readRequest": {
+    "route": "browser",
+    "fallback": false,
+    "detail": "猎聘翻页浏览器搜索响应"
+  },
+  "pendingSummary": {
+    "total": 1290,
+    "success": true,
+    "pending": 1243,
+    "delivered": 47
+  },
+  "selectedDeliveredJob": {
+    "jobId": 56653851,
+    "jobTitle": "现场技术支持工程师",
+    "jobLink": "https://www.liepin.com/job/1956653851.shtml",
+    "jobDescription": "职位介绍\n测试/运维/售后/现场技术支持工程师\n岗位职责\n1.协助公司充电产品测试及系统调试工作；\n2.经培训可独立完成测试环境搭建和测试工作；\n3.及时反馈生产、测试及售后中发现的问题，并跟踪、记录问题；\n4.配合研发人员，协助解决现场售后问题。\n5.对光储充电站进行定期维护。\n\n任职要求：\n1.电气工程及自动化、电子技术、通信工程相关专业本科学历；\n2.了解电子器件，有电气图纸阅读能力及较强的动手能力；\n3.熟悉使用办公软件、了解调试工具如万用表，示波器等；\n4.有较强的逻辑分析能力和学习能力，工作积极主动、有责任心、有团队协作精神；\n5.有C1驾驶证、电工证、新能源车辆优先。\n其他信息\n行业要求：全部行业",
+    "jobSalaryText": "6-10k·13薪",
+    "jobArea": "广州-黄埔区",
+    "jobEduReq": "本科",
+    "jobExpReq": "经验不限",
+    "jobPublishTime": "20230302193001",
+    "compId": 12309657,
+    "compName": "智光研究院(广州)有限公司",
+    "compIndustry": "电力/热力/燃气/水务",
+    "compScale": "50-99人",
+    "hrId": "d98e3c697cbde5b423cb5fde99552bb7",
+    "hrName": "梁先生",
+    "hrTitle": "顾问",
+    "hrImId": "9a5001a7a30ad4f5f05869f07a8f0e22",
+    "delivered": 1,
+    "createTime": "2026-08-08T15:43:26.274",
+    "updateTime": "2026-08-08T15:50:48.0163656"
+  }
+}

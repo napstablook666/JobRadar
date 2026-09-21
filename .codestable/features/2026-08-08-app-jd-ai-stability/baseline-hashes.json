@@ -1,0 +1,26 @@
+[
+  {
+    "Path": "D:\\Codeg 部署\\get_jobs\\src\\main\\java\\com\\getjobs\\application\\service\\AiService.java",
+    "Hash": "1DB872119A34C871D352CAA32A9ADDC5C2E415618D6BFD19AD626F907AE9493D"
+  },
+  {
+    "Path": "D:\\Codeg 部署\\get_jobs\\src\\main\\java\\com\\getjobs\\application\\service\\Job51Service.java",
+    "Hash": "5B17E13FF36F51B1D406BAA4A4F5B97A2C9399E4D9628330B94CD96667C6901E"
+  },
+  {
+    "Path": "D:\\Codeg 部署\\get_jobs\\src\\main\\java\\com\\getjobs\\worker\\job51\\Job51.java",
+    "Hash": "24FADA2B59427BAF95FD966A8C00293974B6BB85AEB7691EA458DCC38C692EBD"
+  },
+  {
+    "Path": "D:\\Codeg 部署\\get_jobs\\src\\main\\java\\com\\getjobs\\worker\\job51\\Job51Locators.java",
+    "Hash": "8E75F77EE04272434A934C6662A355EB4E333ED167A1D4F6F993DFEBA909AE9A"
+  },
+  {
+    "Path": "D:\\Codeg 部署\\get_jobs\\src\\test\\java\\com\\getjobs\\application\\service\\AiPromptTest.java",
+    "Hash": "727D48B79EF53985A808E8675C620B84322213CCF5379BA9DF0649B61975B6F3"
+  },
+  {
+    "Path": "D:\\Codeg 部署\\get_jobs\\src\\test\\java\\com\\getjobs\\worker\\job51\\Job51BehaviorTest.java",
+    "Hash": "CF044457910A4E1F686013EC05BD64476BE9E2DAB5C77F867C944C34EA03D08E"
+  }
+]

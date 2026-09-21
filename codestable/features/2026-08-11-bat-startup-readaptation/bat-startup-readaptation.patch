@@ -1,0 +1,115 @@
+diff --git a/bin/start-services.ps1 b/bin/start-services.ps1
+index 73fbf0d..4bd9232 100644
+--- a/bin/start-services.ps1
++++ b/bin/start-services.ps1
+@@ -125,10 +125,4 @@ if ($verLine) { Write-Host $verLine }
+-# package manager
+-$pmCmd = $null
+-if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+-    $pmCmd = "call pnpm.cmd"
+-    Write-Step "[OK] using pnpm"
+-} elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+-    $pmCmd = "call npx.cmd --yes pnpm"
+-    Write-Step "[WARN] pnpm missing, using: npx --yes pnpm"
+-} else {
+-    Write-Host "[ERROR] pnpm/npm not found"
++# frontend runtime
++$node = Get-Command node.exe -ErrorAction SilentlyContinue
++if (-not $node) {
++    Write-Host "[ERROR] Node.js not found"
+@@ -137,0 +132,2 @@ if (Get-Command pnpm -ErrorAction SilentlyContinue) {
++$nodeExe = $node.Source
++Write-Step "[OK] using Node.js $nodeExe"
+@@ -143,0 +140,5 @@ if (-not (Test-Path -LiteralPath (Join-Path $Front "package.json"))) {
++if (-not (Test-Path -LiteralPath (Join-Path $Front "node_modules\next\dist\bin\next"))) {
++    Write-Host "[ERROR] local Next.js dependency missing: $Front\node_modules\next"
++    if (-not $env:GETJOBS_NO_PAUSE) { pause }
++    exit 1
++}
+@@ -163 +164 @@ echo log: $FrontLog
+-$pmCmd dev > "$FrontLog" 2>&1
++"$nodeExe" start-dev.mjs > "$FrontLog" 2>&1
+@@ -193 +194 @@ if (Test-Path -LiteralPath $lock) {
+-Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "call", "`"$FrontRun`"") -WorkingDirectory $Front -WindowStyle Hidden
++$frontProcess = Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "call", "`"$FrontRun`"") -WorkingDirectory $Front -WindowStyle Hidden -PassThru
+@@ -195 +196 @@ Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "call", "`"$FrontR
+-$ready = $false
++$frontReady = $false
+@@ -199 +200,6 @@ for ($i = 1; $i -le 60; $i++) {
+-        $ready = $true
++        $frontReady = $true
++        break
++    }
++    $frontProcess.Refresh()
++    if ($frontProcess.HasExited) {
++        Write-Step "[ERROR] frontend exited code=$($frontProcess.ExitCode). log: $FrontLog"
+@@ -204,2 +210,2 @@ for ($i = 1; $i -le 60; $i++) {
+-if (-not $ready) {
+-    Write-Step "[WARN] frontend not ready in 60s, continue. log: $FrontLog"
++if (-not $frontReady) {
++    Write-Step "[ERROR] frontend not ready. log: $FrontLog"
+@@ -210 +216 @@ Write-Step "[3/4] Start backend http://localhost:8888"
+-Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "call", "`"$BackRun`"") -WorkingDirectory $Root -WindowStyle Hidden
++$backProcess = Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "call", "`"$BackRun`"") -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+@@ -212 +218 @@ Start-Process -FilePath "cmd.exe" -ArgumentList @("/d", "/c", "call", "`"$BackRu
+-$ready = $false
++$backendReady = $false
+@@ -216 +222,6 @@ for ($i = 1; $i -le 120; $i++) {
+-        $ready = $true
++        $backendReady = $true
++        break
++    }
++    $backProcess.Refresh()
++    if ($backProcess.HasExited) {
++        Write-Step "[ERROR] backend exited code=$($backProcess.ExitCode). log: $BackLog"
+@@ -221,2 +232,2 @@ for ($i = 1; $i -le 120; $i++) {
+-if (-not $ready) {
+-    Write-Step "[WARN] backend not ready in 120s. check log: $BackLog"
++if (-not $backendReady) {
++    Write-Step "[ERROR] backend not ready. check log: $BackLog"
+@@ -227 +238 @@ Write-Step "[4/4] Open admin page"
+-if ($OpenBrowser -and -not $NoBrowser) {
++if ($frontReady -and $backendReady -and $OpenBrowser -and -not $NoBrowser) {
+@@ -228,0 +240,2 @@ if ($OpenBrowser -and -not $NoBrowser) {
++} elseif (-not ($frontReady -and $backendReady)) {
++    Write-Host "Admin page kept closed because a service is not ready."
+@@ -235 +248,5 @@ Write-Host "==============================================="
+-Write-Host " Start done"
++if ($frontReady -and $backendReady) {
++    Write-Host " Start done"
++} else {
++    Write-Host " Start failed"
++}
+@@ -248 +265,4 @@ if (-not $env:GETJOBS_NO_PAUSE) { pause }
+-exit 0
++if ($frontReady -and $backendReady -and (Test-HttpOk "http://127.0.0.1:6866/") -and (Test-TcpPort "127.0.0.1" 8888)) {
++    exit 0
++}
++exit 1
+diff --git a/front/start-dev.mjs b/front/start-dev.mjs
+index 7b35c66..4e8d127 100644
+--- a/front/start-dev.mjs
++++ b/front/start-dev.mjs
+@@ -22,2 +22,3 @@ const hostname = config.development?.hostname || 'localhost';
+-// 启动Next.js开发服务器
+-const nextDev = spawn('npx', ['next', 'dev', '-p', port.toString(), '-H', hostname], {
++// 直接使用本地 Next CLI，避免 npx/pnpm 在启动时触发依赖安装。
++const nextCli = require.resolve('next/dist/bin/next');
++const nextDev = spawn(process.execPath, [nextCli, 'dev', '-p', port.toString(), '-H', hostname], {
+@@ -25 +25,0 @@ const nextDev = spawn('npx', ['next', 'dev', '-p', port.toString(), '-H', hostna
+-  shell: true
+@@ -35 +35 @@ nextDev.on('close', (code) => {
+-});
+\ No newline at end of file
++});
+diff --git "a/\350\277\233\345\272\246\347\231\275\346\235\277.md" "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+index c04b0e6..02b364d 100644
+--- "a/\350\277\233\345\272\246\347\231\275\346\235\277.md"
++++ "b/\350\277\233\345\272\246\347\231\275\346\235\277.md"
+@@ -345,0 +346,6 @@
++
++✅ 已完成：BAT 启动链重新适配 —— 前端改用本地 Next CLI，绕过启动时的 pnpm/npx 依赖预检；服务子进程提前退出时立即显示日志并返回失败码。
++✅ 已完成：BAT 重适配回归 —— 从项目目录和 `C:\Windows` 启动均返回 0，前端 HTTP 200、后端健康接口 200，停止后 6866/8888 端口释放。
++🔨 正在做：无 —— 本地提交 `095646e` 已生成；CodeStable 快改记录已写入 `codestable/issues/017-x-ff-bat-startup-readaptation.md`。
++⬜ 还没做：无。
++❓ 需要你决定：无。

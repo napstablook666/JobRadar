@@ -1,0 +1,15 @@
+# APP 风控节奏适配修改产物清单
+
+以下为工作区当前版本；基线与当前 SHA256 见 baseline-hashes.txt。
+
+44C02F1B2A127F60FB542DF65E28E0DA0E87D7E2893D0DEB304633358650DA72  front/app/liepin/page.tsx
+2A280EED7277080E9F2C3F50408E7220FAB4360FB4338E52A9E4700C14F98A06  src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+52CA9E095DCDB373888DC66A4A030397E4AD4FFE0B1488A76CE665DADAF60135  src/main/java/com/getjobs/application/service/ConfigService.java
+C2007EB08BCDA80F5C39C9D6995C448C00418EAC708D883401DCD88FF2FE5D4F  src/main/java/com/getjobs/application/service/LiepinService.java
+8C9EBF1C3434ABA0B595C8854EBFB4D8E7E711C49EFE2BFB27560975944602F3  src/main/java/com/getjobs/worker/liepin/Liepin.java
+E90381322933B61D96E56DC6BAB89EE211BAB2966AF07DA5A1D0E1316457EC9B  src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+501A65B01011EF2283ACBE35D265B6206B278EC58C12DE9E09833A5CDA178130  src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java
+DFBB881CFDD22CC83E9865C2B4E05A6562C8941A41D205473F7F33574DB48029  src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+
+变更字段：搜索/翻页/详情/发送间隔、批次大小、批次冷却、风险信号识别。
+验证状态：Java 全量测试、前端定向 ESLint、生产构建、patch 应用和隔离回滚均通过。

@@ -1,0 +1,9 @@
+Browser background mode baseline captured before implementation
+2026-08-08
+
+D:\Codeg 部署\get_jobs\src\main\java\com\getjobs\worker\manager\PlaywrightManager.java 7473200984A01A623D06183F592C27C658EE26498F95A3160611C006A47186A1
+D:\Codeg 部署\get_jobs\src\main\java\com\getjobs\application\controller\PlaywrightController.java FE873B4D5A3961F6E2495AD9A5085CBE2F8009C2EF8A09D3ED7C26EC83A0AEA3
+D:\Codeg 部署\get_jobs\src\main\resources\application.yaml 5D3D2A5507B15B398EB41F3FDBF46BF30A45AE6001FBE0C261F700D2D921B35E
+D:\Codeg 部署\get_jobs\bin\start-services.ps1 517CBCB09F0C7AD9AA53E5833F6B80B888B62C6D67068D8DF7CD0418F93A332D
+
+The manager file already contained unrelated working-tree changes before this task; the hash records that exact starting state.

@@ -1,0 +1,305 @@
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index 2e498f6..4933742 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -111,17 +111,17 @@ export default function LiepinPage() {
+     aiReviewMinScore: 60,
+     aiBatchSize: 5,
+     maxPerRun: 10,
+-    minDelaySeconds: 120,
+-    maxDelaySeconds: 240,
+-    searchMinDelaySeconds: 60,
+-    searchMaxDelaySeconds: 120,
+-    pageMinDelaySeconds: 30,
+-    pageMaxDelaySeconds: 60,
+-    detailMinDelaySeconds: 45,
+-    detailMaxDelaySeconds: 90,
++    minDelaySeconds: 90,
++    maxDelaySeconds: 180,
++    searchMinDelaySeconds: 30,
++    searchMaxDelaySeconds: 60,
++    pageMinDelaySeconds: 15,
++    pageMaxDelaySeconds: 30,
++    detailMinDelaySeconds: 20,
++    detailMaxDelaySeconds: 40,
+     rateGuardBatchSize: 5,
+-    batchCooldownMinSeconds: 1200,
+-    batchCooldownMaxSeconds: 1800,
++    batchCooldownMinSeconds: 600,
++    batchCooldownMaxSeconds: 900,
+   })
+   const [options, setOptions] = useState<LiepinOptions>({
+     city: [],
+@@ -262,21 +262,21 @@ export default function LiepinPage() {
+         normalized.aiReviewMinScore = Math.max(0, Math.min(normalized.aiMinScore, data.config.aiReviewMinScore ?? 60))
+         normalized.aiBatchSize = Math.max(3, Math.min(10, data.config.aiBatchSize ?? 5))
+         normalized.maxPerRun = Math.min(data.config.maxPerRun ?? 10, 10)
+-        normalized.minDelaySeconds = Math.max(data.config.minDelaySeconds ?? 120, 120)
+-        normalized.maxDelaySeconds = Math.max(data.config.maxDelaySeconds ?? 240, normalized.minDelaySeconds, 240)
+-        normalized.searchMinDelaySeconds = Math.max(15, Math.min(300, data.config.searchMinDelaySeconds ?? 60))
++        normalized.minDelaySeconds = Math.max(data.config.minDelaySeconds ?? 90, 90)
++        normalized.maxDelaySeconds = Math.max(data.config.maxDelaySeconds ?? 180, normalized.minDelaySeconds, 180)
++        normalized.searchMinDelaySeconds = Math.max(15, Math.min(300, data.config.searchMinDelaySeconds ?? 30))
+         normalized.searchMaxDelaySeconds = Math.max(normalized.searchMinDelaySeconds,
+-          Math.min(300, Math.max(120, data.config.searchMaxDelaySeconds ?? 120)))
+-        normalized.pageMinDelaySeconds = Math.max(15, Math.min(300, data.config.pageMinDelaySeconds ?? 30))
++          Math.min(300, Math.max(30, data.config.searchMaxDelaySeconds ?? 60)))
++        normalized.pageMinDelaySeconds = Math.max(15, Math.min(300, data.config.pageMinDelaySeconds ?? 15))
+         normalized.pageMaxDelaySeconds = Math.max(normalized.pageMinDelaySeconds,
+-          Math.min(300, Math.max(60, data.config.pageMaxDelaySeconds ?? 60)))
+-        normalized.detailMinDelaySeconds = Math.max(15, Math.min(300, data.config.detailMinDelaySeconds ?? 45))
++          Math.min(300, Math.max(15, data.config.pageMaxDelaySeconds ?? 30)))
++        normalized.detailMinDelaySeconds = Math.max(15, Math.min(300, data.config.detailMinDelaySeconds ?? 20))
+         normalized.detailMaxDelaySeconds = Math.max(normalized.detailMinDelaySeconds,
+-          Math.min(300, Math.max(90, data.config.detailMaxDelaySeconds ?? 90)))
++          Math.min(300, Math.max(20, data.config.detailMaxDelaySeconds ?? 40)))
+         normalized.rateGuardBatchSize = Math.max(1, Math.min(10, data.config.rateGuardBatchSize ?? 5))
+-        normalized.batchCooldownMinSeconds = Math.max(300, Math.min(3600, data.config.batchCooldownMinSeconds ?? 1200))
++        normalized.batchCooldownMinSeconds = Math.max(300, Math.min(3600, data.config.batchCooldownMinSeconds ?? 600))
+         normalized.batchCooldownMaxSeconds = Math.max(normalized.batchCooldownMinSeconds,
+-          Math.min(3600, data.config.batchCooldownMaxSeconds ?? 1800))
++          Math.min(3600, data.config.batchCooldownMaxSeconds ?? 900))
+         setConfig(normalized)
+         // 检查当前城市是否在选项列表中
+         if (data.options?.city && data.config.city) {
+@@ -894,9 +894,9 @@ export default function LiepinPage() {
+                 <Input
+                   id="minDelaySeconds"
+                   type="number"
+-                  min={120}
++                  min={90}
+                   max={300}
+-                  value={config.minDelaySeconds ?? 120}
++                  value={config.minDelaySeconds ?? 90}
+                   onChange={(e) => setConfig({ ...config, minDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -905,9 +905,9 @@ export default function LiepinPage() {
+                 <Input
+                   id="maxDelaySeconds"
+                   type="number"
+-                  min={120}
++                  min={90}
+                   max={300}
+-                  value={config.maxDelaySeconds ?? 240}
++                  value={config.maxDelaySeconds ?? 180}
+                   onChange={(e) => setConfig({ ...config, maxDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -918,7 +918,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={15}
+                   max={300}
+-                  value={config.searchMinDelaySeconds ?? 60}
++                  value={config.searchMinDelaySeconds ?? 30}
+                   onChange={(e) => setConfig({ ...config, searchMinDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -929,7 +929,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={15}
+                   max={300}
+-                  value={config.searchMaxDelaySeconds ?? 120}
++                  value={config.searchMaxDelaySeconds ?? 60}
+                   onChange={(e) => setConfig({ ...config, searchMaxDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -940,7 +940,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={15}
+                   max={300}
+-                  value={config.pageMinDelaySeconds ?? 30}
++                  value={config.pageMinDelaySeconds ?? 15}
+                   onChange={(e) => setConfig({ ...config, pageMinDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -951,7 +951,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={15}
+                   max={300}
+-                  value={config.pageMaxDelaySeconds ?? 60}
++                  value={config.pageMaxDelaySeconds ?? 30}
+                   onChange={(e) => setConfig({ ...config, pageMaxDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -962,7 +962,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={15}
+                   max={300}
+-                  value={config.detailMinDelaySeconds ?? 45}
++                  value={config.detailMinDelaySeconds ?? 20}
+                   onChange={(e) => setConfig({ ...config, detailMinDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -973,7 +973,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={15}
+                   max={300}
+-                  value={config.detailMaxDelaySeconds ?? 90}
++                  value={config.detailMaxDelaySeconds ?? 40}
+                   onChange={(e) => setConfig({ ...config, detailMaxDelaySeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -995,7 +995,7 @@ export default function LiepinPage() {
+                   type="number"
+                   min={300}
+                   max={3600}
+-                  value={config.batchCooldownMinSeconds ?? 1200}
++                  value={config.batchCooldownMinSeconds ?? 600}
+                   onChange={(e) => setConfig({ ...config, batchCooldownMinSeconds: Number(e.target.value) })}
+                 />
+               </div>
+@@ -1006,13 +1006,13 @@ export default function LiepinPage() {
+                   type="number"
+                   min={300}
+                   max={3600}
+-                  value={config.batchCooldownMaxSeconds ?? 1800}
++                  value={config.batchCooldownMaxSeconds ?? 900}
+                   onChange={(e) => setConfig({ ...config, batchCooldownMaxSeconds: Number(e.target.value) })}
+                 />
+               </div>
+             </div>
+             <p className="mt-3 text-xs text-muted-foreground">
+-              当前保守基线：搜索 60-120 秒、翻页 30-60 秒、详情 45-90 秒、发送 120-240 秒；命中平台风控信号后任务会停止并记录原因。
++              当前提速基线：搜索 30-60 秒、翻页 15-30 秒、详情 20-40 秒、发送 90-180 秒；命中平台风控信号后任务会停止并记录原因。
+             </p>
+             <div className="mt-6 space-y-3 rounded-md border p-4">
+               <div className="flex flex-wrap items-center justify-between gap-3">
+
+diff --git a/src/main/java/com/getjobs/application/service/LiepinService.java b/src/main/java/com/getjobs/application/service/LiepinService.java
+index a05df1d..add740e 100644
+--- a/src/main/java/com/getjobs/application/service/LiepinService.java
++++ b/src/main/java/com/getjobs/application/service/LiepinService.java
+@@ -95,37 +95,37 @@ public class LiepinService {
+                 stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_per_run INTEGER DEFAULT 10");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN min_delay_seconds INTEGER DEFAULT 120");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN min_delay_seconds INTEGER DEFAULT 90");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_delay_seconds INTEGER DEFAULT 240");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_delay_seconds INTEGER DEFAULT 180");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN search_min_delay_seconds INTEGER DEFAULT 60");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN search_min_delay_seconds INTEGER DEFAULT 30");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN search_max_delay_seconds INTEGER DEFAULT 120");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN search_max_delay_seconds INTEGER DEFAULT 60");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN page_min_delay_seconds INTEGER DEFAULT 30");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN page_min_delay_seconds INTEGER DEFAULT 15");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN page_max_delay_seconds INTEGER DEFAULT 60");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN page_max_delay_seconds INTEGER DEFAULT 30");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN detail_min_delay_seconds INTEGER DEFAULT 45");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN detail_min_delay_seconds INTEGER DEFAULT 20");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN detail_max_delay_seconds INTEGER DEFAULT 90");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN detail_max_delay_seconds INTEGER DEFAULT 40");
+             } catch (Exception ignored) {}
+             try {
+                 stmt.execute("ALTER TABLE liepin_config ADD COLUMN rate_guard_batch_size INTEGER DEFAULT 5");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN batch_cooldown_min_seconds INTEGER DEFAULT 1200");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN batch_cooldown_min_seconds INTEGER DEFAULT 600");
+             } catch (Exception ignored) {}
+             try {
+-                stmt.execute("ALTER TABLE liepin_config ADD COLUMN batch_cooldown_max_seconds INTEGER DEFAULT 1800");
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN batch_cooldown_max_seconds INTEGER DEFAULT 900");
+             } catch (Exception ignored) {}
+             // 分页断点续跑进度表
+             stmt.execute(
+@@ -792,7 +792,7 @@ public class LiepinService {
+         if (config.getMinDelaySeconds() < 0
+                 || config.getMaxDelaySeconds() < config.getMinDelaySeconds()
+                 || config.getMaxDelaySeconds() > LiepinConfig.MAX_RATE_DELAY_SECONDS) {
+-            throw new IllegalArgumentException("猎聘发送等待需满足 120<=最小秒数<=最大秒数<=300");
++            throw new IllegalArgumentException("猎聘发送等待需满足 90<=最小秒数<=最大秒数<=300");
+         }
+     }
+ 
+
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index 65b3df3..ba23dc4 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -495,7 +495,7 @@ public class Liepin {
+         if (minDelay < LiepinConfig.MIN_SAFE_SEND_DELAY_SECONDS
+                 || maxDelay < minDelay
+                 || maxDelay > LiepinConfig.MAX_RATE_DELAY_SECONDS) {
+-            throw new IllegalArgumentException("猎聘发送间隔需满足 120<=最小秒数<=最大秒数<=300");
++            throw new IllegalArgumentException("猎聘发送间隔需满足 90<=最小秒数<=最大秒数<=300");
+         }
+         if ((config.isAutoAiDeliveryEnabled() || config.isBatchShadowEnabled()) && !config.isAiEnabled()) {
+             throw new IllegalArgumentException("开启AI投递模式前，请先开启AI招呼语");
+
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+index 5322a90..bd00b86 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+@@ -12,22 +12,22 @@ import java.util.List;
+ public class LiepinConfig {
+     public static final int MAX_SAFE_PER_RUN = 10;
+     public static final int DEFAULT_MAX_PER_RUN = 10;
+-    public static final int MIN_SAFE_SEND_DELAY_SECONDS = 120;
+-    public static final int DEFAULT_MIN_DELAY_SECONDS = 120;
+-    public static final int DEFAULT_MAX_DELAY_SECONDS = 240;
++    public static final int MIN_SAFE_SEND_DELAY_SECONDS = 90;
++    public static final int DEFAULT_MIN_DELAY_SECONDS = 90;
++    public static final int DEFAULT_MAX_DELAY_SECONDS = 180;
+     public static final int MIN_RATE_DELAY_SECONDS = 15;
+     public static final int MAX_RATE_DELAY_SECONDS = 300;
+-    public static final int DEFAULT_SEARCH_MIN_DELAY_SECONDS = 60;
+-    public static final int DEFAULT_SEARCH_MAX_DELAY_SECONDS = 120;
+-    public static final int DEFAULT_PAGE_MIN_DELAY_SECONDS = 30;
+-    public static final int DEFAULT_PAGE_MAX_DELAY_SECONDS = 60;
+-    public static final int DEFAULT_DETAIL_MIN_DELAY_SECONDS = 45;
+-    public static final int DEFAULT_DETAIL_MAX_DELAY_SECONDS = 90;
++    public static final int DEFAULT_SEARCH_MIN_DELAY_SECONDS = 30;
++    public static final int DEFAULT_SEARCH_MAX_DELAY_SECONDS = 60;
++    public static final int DEFAULT_PAGE_MIN_DELAY_SECONDS = 15;
++    public static final int DEFAULT_PAGE_MAX_DELAY_SECONDS = 30;
++    public static final int DEFAULT_DETAIL_MIN_DELAY_SECONDS = 20;
++    public static final int DEFAULT_DETAIL_MAX_DELAY_SECONDS = 40;
+     public static final int DEFAULT_RATE_GUARD_BATCH_SIZE = 5;
+     public static final int MIN_RATE_GUARD_BATCH_SIZE = 1;
+     public static final int MAX_RATE_GUARD_BATCH_SIZE = 10;
+-    public static final int DEFAULT_BATCH_COOLDOWN_MIN_SECONDS = 1200;
+-    public static final int DEFAULT_BATCH_COOLDOWN_MAX_SECONDS = 1800;
++    public static final int DEFAULT_BATCH_COOLDOWN_MIN_SECONDS = 600;
++    public static final int DEFAULT_BATCH_COOLDOWN_MAX_SECONDS = 900;
+     public static final int MIN_BATCH_COOLDOWN_SECONDS = 300;
+     public static final int MAX_BATCH_COOLDOWN_SECONDS = 3600;
+     public static final int DEFAULT_AI_MIN_SCORE = 70;
+
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+index 060f947..21036f9 100644
+--- a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java
+@@ -139,12 +139,12 @@ class LiepinRateGuardTest {
+         config.setBatchCooldownMaxSeconds(2);
+ 
+         assertEquals(10, config.effectiveMaxPerRun());
+-        assertEquals(120, config.effectiveMinDelaySeconds());
+-        assertEquals(240, config.effectiveMaxDelaySeconds());
++        assertEquals(90, config.effectiveMinDelaySeconds());
++        assertEquals(180, config.effectiveMaxDelaySeconds());
+         assertEquals(15, config.effectiveSearchMinDelaySeconds());
+-        assertEquals(120, config.effectiveSearchMaxDelaySeconds());
++        assertEquals(60, config.effectiveSearchMaxDelaySeconds());
+         assertEquals(300, config.effectiveBatchCooldownMinSeconds());
+-        assertEquals(1800, config.effectiveBatchCooldownMaxSeconds());
++        assertEquals(900, config.effectiveBatchCooldownMaxSeconds());
+     }
+ 
+     @Test
+

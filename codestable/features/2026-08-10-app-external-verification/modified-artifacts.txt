@@ -1,0 +1,10 @@
+src/main/java/com/getjobs/application/entity/Job51Entity.java
+src/main/java/com/getjobs/application/service/Job51Service.java
+src/main/java/com/getjobs/application/controller/JobController.java
+src/main/java/com/getjobs/worker/job51/Job51.java
+src/main/java/com/getjobs/worker/service/Job51JobService.java
+src/main/java/com/getjobs/worker/manager/BrowserLoginSession.java
+src/main/java/com/getjobs/worker/manager/PlatformBrowserRuntime.java
+src/main/java/com/getjobs/worker/manager/PlaywrightManager.java
+front/app/51job/page.tsx
+front/app/51job/analysis/AnalysisContent.tsx

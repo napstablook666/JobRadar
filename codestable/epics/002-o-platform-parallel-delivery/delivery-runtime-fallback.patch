@@ -1,0 +1,69 @@
+diff --git a/src/main/java/com/getjobs/worker/service/Job51JobService.java b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+--- a/src/main/java/com/getjobs/worker/service/Job51JobService.java
++++ b/src/main/java/com/getjobs/worker/service/Job51JobService.java
+@@ -22,4 +22,5 @@
+ import java.util.List;
+ import java.util.Map;
+ import java.util.concurrent.Executor;
++import java.util.concurrent.ForkJoinPool;
+ import java.util.function.Consumer;
+@@ -50,5 +51,5 @@
+     @Autowired
+     @Qualifier("deliveryExecutor")
+-    private Executor deliveryExecutor = Runnable::run;
++    private Executor deliveryExecutor = ForkJoinPool.commonPool();
+ 
+     // 任务运行状态
+     private volatile boolean isRunning = false;
+diff --git a/src/main/java/com/getjobs/worker/service/BossJobService.java b/src/main/java/com/getjobs/worker/service/BossJobService.java
+--- a/src/main/java/com/getjobs/worker/service/BossJobService.java
++++ b/src/main/java/com/getjobs/worker/service/BossJobService.java
+@@ -16,4 +16,5 @@
+ import java.util.HashMap;
+ import java.util.Map;
+ import java.util.concurrent.Executor;
++import java.util.concurrent.ForkJoinPool;
+ import java.util.function.Consumer;
+@@ -34,5 +35,5 @@
+     @Autowired
+     @Qualifier("deliveryExecutor")
+-    private Executor deliveryExecutor = Runnable::run;
++    private Executor deliveryExecutor = ForkJoinPool.commonPool();
+ 
+     // 任务运行状态
+     private volatile boolean isRunning = false;
+diff --git a/src/main/java/com/getjobs/worker/service/ZhilianJobService.java b/src/main/java/com/getjobs/worker/service/ZhilianJobService.java
+--- a/src/main/java/com/getjobs/worker/service/ZhilianJobService.java
++++ b/src/main/java/com/getjobs/worker/service/ZhilianJobService.java
+@@ -16,4 +16,5 @@
+ import java.util.HashMap;
+ import java.util.Map;
+ import java.util.concurrent.Executor;
++import java.util.concurrent.ForkJoinPool;
+ import java.util.function.Consumer;
+@@ -34,5 +35,5 @@
+     @Autowired
+     @Qualifier("deliveryExecutor")
+-    private Executor deliveryExecutor = Runnable::run;
++    private Executor deliveryExecutor = ForkJoinPool.commonPool();
+ 
+     // 任务运行状态
+     private volatile boolean isRunning = false;
+diff --git a/src/main/java/com/getjobs/worker/service/LiepinJobService.java b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+--- a/src/main/java/com/getjobs/worker/service/LiepinJobService.java
++++ b/src/main/java/com/getjobs/worker/service/LiepinJobService.java
+@@ -26,5 +26,6 @@
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.ForkJoinPool;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicInteger;
+@@ -74,5 +75,5 @@
+     @Autowired
+     @Qualifier("deliveryExecutor")
+-    private java.util.concurrent.Executor deliveryExecutor = Runnable::run;
++    private java.util.concurrent.Executor deliveryExecutor = ForkJoinPool.commonPool();
+ 
+     // 运行状态标志
+     private volatile boolean isRunning = false;

@@ -1,0 +1,52 @@
+--- a/一键启动.bat
++++ /dev/null
+@@
+-@echo off
+-setlocal EnableExtensions
+-cd /d "%~dp0"
+-set "GETJOBS_NO_PAUSE=1"
+-powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%~dp0bin\start-services.ps1" %*
+-set "ERR=%ERRORLEVEL%"
+-endlocal & exit /b %ERR%
+--- a/一键停止.bat
++++ /dev/null
+@@
+-@echo off
+-setlocal EnableExtensions
+-cd /d "%~dp0"
+-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0bin\stop-services.ps1" %*
+-set "ERR=%ERRORLEVEL%"
+-endlocal & exit /b %ERR%
+--- /dev/null
++++ b/restart.bat
+@@
++@echo off
++setlocal EnableExtensions
++cd /d "%~dp0"
++set "GETJOBS_NO_PAUSE=1"
++
++call "%~dp0stop.bat" -Quiet
++set "ERR=%ERRORLEVEL%"
++if not "%ERR%"=="0" goto :done
++
++call "%~dp0start.bat" %*
++set "ERR=%ERRORLEVEL%"
++
++:done
++endlocal & exit /b %ERR%
+--- a/bin/start-services.ps1
++++ b/bin/start-services.ps1
+@@
+-Write-Host " Stop:    double-click 一键停止.bat  (or stop.bat)"
++Write-Host " Stop:    double-click stop.bat"
++Write-Host " Restart: double-click restart.bat"
+--- a/进度白板.md
++++ b/进度白板.md
+@@
++✅ 已完成：BAT 运维入口三件套 —— 根目录统一保留 start.bat、restart.bat、stop.bat，启动、重启、停止入口清晰分开。
++✅ 已完成：BAT 重启链路隔离验证 —— 停止顺序、参数透传、失败码传播、路径解析和回滚均已验证。
++🔨 正在做：运行态重启收口 —— 真实重启后前端已恢复，后端标准 bootRun 受既有 Java 编译错误影响，当前已用旧编译产物恢复 8888。
++⬜ 还没做：既有 Java 编译错误修复后，用标准 restart.bat 再做一次后端就绪验证。
++❓ 需要你决定：无。
+
+# start.bat and restart.bat use CRLF; stop.bat retained its baseline bytes.

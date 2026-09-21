@@ -1,0 +1,220 @@
+diff --git a/front/app/51job/page.tsx b/front/app/51job/page.tsx
+index eb77bcb..7a6ef9f 100644
+--- a/front/app/51job/page.tsx
++++ b/front/app/51job/page.tsx
+@@ -1,7 +1,6 @@
+ 'use client'
+ 
+ import { useState, useEffect, useRef } from 'react'
+-import dynamic from 'next/dynamic'
+ import { createSSEWithBackoff } from '@/lib/sse'
+ import { Check, LogOut, Save, Briefcase, Play, Square } from 'lucide-react'
+ import { Button } from '@/components/ui/button'
+@@ -11,12 +10,6 @@ import { Textarea } from '@/components/ui/textarea'
+ import { Label } from '@/components/ui/label'
+ import { Select } from '@/components/ui/select'
+ import PageHeader from '@/app/components/PageHeader'
+-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+-
+-const AnalysisContent = dynamic(() => import('@/app/51job/analysis/AnalysisContent'), {
+-  ssr: false,
+-  loading: () => <div className="py-12 text-center text-sm text-muted-foreground">加载分析中...</div>,
+-})
+ import { keywordLinesForDisplay, keywordLinesForStorage } from '@/lib/keyword-lines'
+ 
+ interface Job51Config {
+@@ -666,13 +659,7 @@ export default function Job51Page() {
+         </div>
+       </div>
+ 
+-      <Tabs defaultValue="config" className="w-full">
+-        <TabsList className="grid w-full grid-cols-2">
+-          <TabsTrigger value="config">平台配置</TabsTrigger>
+-          <TabsTrigger value="analytics">投递分析</TabsTrigger>
+-        </TabsList>
+-
+-        <TabsContent value="config" className="space-y-6 mt-6">
++      <div className="space-y-6 mt-6">
+           {/* 平台说明 */}
+           <Card className="animate-in fade-in slide-in-from-bottom-5 duration-700">
+             <CardHeader>
+@@ -921,12 +908,7 @@ export default function Job51Page() {
+               )}
+             </CardContent>
+           </Card>
+-        </TabsContent>
+-
+-        <TabsContent value="analytics" className="space-y-6 mt-6">
+-          <AnalysisContent />
+-        </TabsContent>
+-      </Tabs>
++      </div>
+ 
+       {/* 退出确认弹框 */}
+       {showLogoutDialog && (
+diff --git a/front/app/boss/page.tsx b/front/app/boss/page.tsx
+index 7f01d87..3244848 100644
+--- a/front/app/boss/page.tsx
++++ b/front/app/boss/page.tsx
+@@ -1,7 +1,6 @@
+ 'use client'
+ 
+ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+-import dynamic from 'next/dynamic'
+ import { createSSEWithBackoff } from '@/lib/sse'
+ import { createPortal } from 'react-dom'
+ import { Briefcase, Save, Search, Banknote, Building2, Trash2, Plus, Play, Square, LogOut, KeyRound, ChevronDown } from 'lucide-react'
+@@ -10,16 +9,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
+ import { Input } from '@/components/ui/input'
+ import { Label } from '@/components/ui/label'
+ import { Select } from '@/components/ui/select'
+-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+ import { Textarea } from '@/components/ui/textarea'
+ import { keywordLinesForDisplay, keywordLinesForStorage } from '@/lib/keyword-lines'
+ import PageHeader from '@/app/components/PageHeader'
+ 
+-const AnalysisContent = dynamic(() => import('@/app/boss/analysis/AnalysisContent'), {
+-  ssr: false,
+-  loading: () => <div className="py-12 text-center text-sm text-muted-foreground">加载分析中...</div>,
+-})
+-
+ interface BossConfig {
+   id?: number
+   debugger?: number
+@@ -584,13 +577,7 @@ export default function BossPage() {
+         }
+       />
+ 
+-      <Tabs defaultValue="config" className="w-full">
+-        <TabsList className="grid w-full grid-cols-2">
+-          <TabsTrigger value="config">平台配置</TabsTrigger>
+-          <TabsTrigger value="analytics">投递分析</TabsTrigger>
+-        </TabsList>
+-
+-        <TabsContent value="config" className="space-y-6 mt-6">
++      <div className="space-y-6 mt-6">
+           {/* Cookie 登录 */}
+           <Card className="animate-in fade-in slide-in-from-bottom-5 duration-700">
+             <CardHeader>
+@@ -942,12 +929,7 @@ export default function BossPage() {
+         </Card>
+ 
+         
+-        </TabsContent>
+-
+-        <TabsContent value="analytics" className="space-y-6 mt-6">
+-          <AnalysisContent />
+-        </TabsContent>
+-      </Tabs>
++      </div>
+ 
+       {/* 统计卡片已移除 */}
+       {/* 退出确认弹框 */}
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index fcd25c3..9baf5a4 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -1,7 +1,6 @@
+ 'use client'
+ 
+ import { useState, useEffect, useRef } from 'react'
+-import dynamic from 'next/dynamic'
+ import { createSSEWithBackoff } from '@/lib/sse'
+ import { Search, Save, Target, Banknote, Play, Square, LogOut, Briefcase, Check, X } from 'lucide-react'
+ import { Button } from '@/components/ui/button'
+@@ -10,12 +9,6 @@ import { Input } from '@/components/ui/input'
+ import { Textarea } from '@/components/ui/textarea'
+ import { Label } from '@/components/ui/label'
+ import { Select } from '@/components/ui/select'
+-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+-
+-const AnalysisContent = dynamic(() => import('@/app/liepin/analysis/AnalysisContent'), {
+-  ssr: false,
+-  loading: () => <div className="py-12 text-center text-sm text-muted-foreground">加载分析中...</div>,
+-})
+ import PageHeader from '@/app/components/PageHeader'
+ import { keywordLinesForDisplay, keywordLinesForStorage } from '@/lib/keyword-lines'
+ 
+@@ -782,13 +775,7 @@ export default function LiepinPage() {
+         </Card>
+       )}
+ 
+-      <Tabs defaultValue="config" className="w-full">
+-        <TabsList className="grid w-full grid-cols-2">
+-          <TabsTrigger value="config">平台配置</TabsTrigger>
+-          <TabsTrigger value="analytics">投递分析</TabsTrigger>
+-        </TabsList>
+-
+-        <TabsContent value="config" className="space-y-6 mt-6">
++      <div className="space-y-6 mt-6">
+         {/* 平台说明 */}
+         <Card className="animate-in fade-in slide-in-from-bottom-5 duration-700">
+           <CardHeader>
+@@ -1202,12 +1189,7 @@ export default function LiepinPage() {
+             </div>
+           </CardContent>
+         </Card>
+-        </TabsContent>
+-
+-        <TabsContent value="analytics" className="space-y-6 mt-6">
+-          <AnalysisContent deliveryRunning={isDelivering} />
+-        </TabsContent>
+-      </Tabs>
++      </div>
+ 
+       {/* 退出确认弹框 */}
+       {showLogoutDialog && (
+diff --git a/front/app/zhilian/page.tsx b/front/app/zhilian/page.tsx
+index dbf7055..e176c75 100644
+--- a/front/app/zhilian/page.tsx
++++ b/front/app/zhilian/page.tsx
+@@ -1,7 +1,6 @@
+ 'use client'
+ 
+ import { useState, useEffect } from 'react'
+-import dynamic from 'next/dynamic'
+ import { createSSEWithBackoff } from '@/lib/sse'
+ import { LogOut, Save, Briefcase, Play, Square } from 'lucide-react'
+ import { Button } from '@/components/ui/button'
+@@ -10,12 +9,6 @@ import { Input } from '@/components/ui/input'
+ import { Textarea } from '@/components/ui/textarea'
+ import { Label } from '@/components/ui/label'
+ import { Select } from '@/components/ui/select'
+-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+-
+-const AnalysisContent = dynamic(() => import('@/app/zhilian/analysis/AnalysisContent'), {
+-  ssr: false,
+-  loading: () => <div className="py-12 text-center text-sm text-muted-foreground">加载分析中...</div>,
+-})
+ import PageHeader from '@/app/components/PageHeader'
+ import { keywordLinesForDisplay, keywordLinesForStorage } from '@/lib/keyword-lines'
+ 
+@@ -292,13 +285,7 @@ export default function ZhilianPage() {
+         </div>
+       )}
+ 
+-      <Tabs defaultValue="config" className="w-full">
+-        <TabsList className="grid w-full grid-cols-2">
+-          <TabsTrigger value="config">平台配置</TabsTrigger>
+-          <TabsTrigger value="analytics">投递分析</TabsTrigger>
+-        </TabsList>
+-
+-        <TabsContent value="config" className="space-y-6 mt-6">
++      <div className="space-y-6 mt-6">
+           <Card className="animate-in fade-in slide-in-from-bottom-5 duration-700">
+             <CardHeader>
+               <CardTitle className="flex items-center gap-2">
+@@ -361,12 +348,7 @@ export default function ZhilianPage() {
+               )}
+             </CardContent>
+           </Card>
+-        </TabsContent>
+-
+-        <TabsContent value="analytics" className="space-y-6 mt-6">
+-          <AnalysisContent />
+-        </TabsContent>
+-      </Tabs>
++      </div>
+ 
+       {/* 退出确认弹框 */}
+       {showLogoutDialog && (

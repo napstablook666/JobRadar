@@ -1,0 +1,16 @@
+本次变更文件：
+- src/main/java/com/getjobs/application/service/LiepinService.java
+- src/main/java/com/getjobs/worker/liepin/Liepin.java
+- src/main/java/com/getjobs/worker/service/LiepinJobService.java
+- src/main/java/com/getjobs/application/controller/LiepinController.java
+- front/app/liepin/analysis/AnalysisContent.tsx
+- front/app/liepin/page.tsx
+- src/test/java/com/getjobs/application/service/LiepinServicePendingCleanupTest.java
+- src/test/java/com/getjobs/application/controller/LiepinControllerPendingCleanupTest.java
+- src/test/java/com/getjobs/worker/service/LiepinJobServiceDeliveryTest.java
+
+新增行为：
+- 新增 GET /api/liepin/retry-suspended-summary。
+- 新增 POST /api/liepin/retry-suspended-batch。
+- 批量目标来自 liepin_retry_queue 与未投递岗位的交集，不来自全部 delivered=0/NULL。
+- 队列只记录 AI 请求失败、发送未确认或发送中断；成功发送和明确筛选不通过会清除对应记录。

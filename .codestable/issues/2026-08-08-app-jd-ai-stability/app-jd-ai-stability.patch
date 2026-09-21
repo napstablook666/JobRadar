@@ -1,0 +1,1376 @@
+diff --git a/src/main/java/com/getjobs/application/service/AiService.java b/src/main/java/com/getjobs/application/service/AiService.java
+index 4b7c4bb..bfebb21 100644
+--- a/src/main/java/com/getjobs/application/service/AiService.java
++++ b/src/main/java/com/getjobs/application/service/AiService.java
+@@ -147,11 +147,12 @@ public class AiService {
+ 
+         try {
+             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+-            if (response.statusCode() == 200) {
++            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                 return extractResponseContent(response.body(), endpoint);
+             }
+ 
+-            log.error("AI请求失败: status={}, endpoint={}, body={}", response.statusCode(), endpoint, response.body());
++            log.error("AI请求失败: status={}, endpoint={}, body={}", response.statusCode(), endpoint,
++                    abbreviateForLog(response.body(), 500));
+             if (options.structured() && allowStructuredFallback && isStructuredOptionError(response.body())) {
+                 log.warn("当前 AI 兼容层不接受结构化参数，降级为严格 JSON 文本请求");
+                 return sendRequestInternal(content,
+@@ -162,15 +163,27 @@ public class AiService {
+                 log.warn("检测到 reasoning 相关参数错误，自动切换到 Responses API 重试: {}", fallbackEndpoint);
+                 return sendRequestViaResponses(content, apiKey, model, fallbackEndpoint);
+             }
+-            throw new RuntimeException("AI请求失败，状态码: " + response.statusCode() + ", 详情: " + response.body());
++            throw new RuntimeException("AI请求失败，状态码: " + response.statusCode()
++                    + ", 详情: " + abbreviateForLog(response.body(), 500));
+         } catch (Exception e) {
+             log.error("调用AI服务异常", e);
+             throw e instanceof RuntimeException ? (RuntimeException) e : new RuntimeException(e);
+         }
+     }
+ 
+-    private String extractResponseContent(String body, String endpoint) {
+-        JSONObject responseObject = new JSONObject(body);
++    static String extractResponseContent(String body, String endpoint) {
++        if (body == null || body.isBlank()) return body;
++        Object parsed;
++        try {
++            parsed = new org.json.JSONTokener(body).nextValue();
++        } catch (Exception ignored) {
++            return body;
++        }
++        if (parsed instanceof JSONArray array) {
++            String arrayText = extractContentValue(array);
++            return arrayText == null ? body : arrayText;
++        }
++        if (!(parsed instanceof JSONObject responseObject)) return body;
+         String requestId = responseObject.optString("id");
+         String usedModel = responseObject.optString("model");
+         JSONObject usageObject = responseObject.optJSONObject("usage");
+@@ -183,15 +196,54 @@ public class AiService {
+         if (endpoint.endsWith("/responses")) {
+             String output = responseObject.optString("output_text", null);
+             if (output != null && !output.isBlank()) return output;
++            String outputBlocks = extractContentValue(responseObject.opt("output"));
++            if (outputBlocks != null && !outputBlocks.isBlank()) return outputBlocks;
+             try {
+-                return responseObject.getJSONArray("choices").getJSONObject(0)
+-                        .getJSONObject("message").getString("content");
++                JSONObject message = responseObject.getJSONArray("choices")
++                        .getJSONObject(0).getJSONObject("message");
++                String content = extractMessageContent(message);
++                return content == null ? body : content;
+             } catch (Exception ignored) {
+                 return body;
+             }
+         }
+-        return responseObject.getJSONArray("choices").getJSONObject(0)
+-                .getJSONObject("message").getString("content");
++        try {
++            JSONObject message = responseObject.getJSONArray("choices")
++                    .getJSONObject(0).getJSONObject("message");
++            String content = extractMessageContent(message);
++            return content == null ? body : content;
++        } catch (Exception ignored) {
++            return body;
++        }
++    }
++
++    /** 兼容字符串、文本块数组和部分代理返回的 content 对象。 */
++    private static String extractMessageContent(JSONObject message) {
++        if (message == null) return null;
++        return extractContentValue(message.opt("content"));
++    }
++
++    private static String extractContentValue(Object content) {
++        if (content instanceof String text) return text;
++        if (content instanceof JSONObject object) {
++            String text = firstNonBlank(
++                    object.optString("text", null),
++                    object.optString("value", null),
++                    object.optString("output_text", null)
++            );
++            if (text != null) return text;
++            return extractContentValue(object.opt("content"));
++        }
++        if (content instanceof JSONArray parts) {
++            StringBuilder result = new StringBuilder();
++            for (int i = 0; i < parts.length(); i++) {
++                Object part = parts.opt(i);
++                String text = extractContentValue(part);
++                if (text != null) result.append(text);
++            }
++            return result.isEmpty() ? null : result.toString();
++        }
++        return null;
+     }
+ 
+     private boolean isStructuredOptionError(String body) {
+@@ -271,14 +323,86 @@ public class AiService {
+         String message = raw.trim();
+         message = message.replaceFirst("^```(?:text|plaintext)?\\s*", "");
+         message = message.replaceFirst("\\s*```$", "").trim();
++        String structuredMessage = extractStructuredGreeting(message);
++        if (structuredMessage != null) {
++            message = structuredMessage.trim();
++        }
+         if (message.length() >= 2
+-                && ((message.startsWith("\\\"") && message.endsWith("\\\""))
++                && ((message.startsWith("\"") && message.endsWith("\""))
+                 || (message.startsWith("“") && message.endsWith("”")))) {
+             message = message.substring(1, message.length() - 1).trim();
+         }
+         return message;
+     }
+ 
++    /** 提取常见 JSON 包裹，最终仍交给固定前缀、长度和姓名规则校验。 */
++    private static String extractStructuredGreeting(String value) {
++        if (value == null || value.isBlank()) return null;
++        String trimmed = value.trim();
++        boolean objectEnvelope = trimmed.startsWith("{") && trimmed.endsWith("}");
++        boolean arrayEnvelope = trimmed.startsWith("[") && trimmed.endsWith("]");
++        if (!objectEnvelope && !arrayEnvelope) return null;
++        try {
++            Object parsed = new org.json.JSONTokener(trimmed).nextValue();
++            if (parsed instanceof JSONObject object) {
++                String direct = extractGreetingObject(object);
++                if (direct != null) return direct;
++            } else if (parsed instanceof JSONArray array) {
++                for (int i = 0; i < array.length(); i++) {
++                    Object item = array.opt(i);
++                    if (item instanceof String text && !text.isBlank()) return text;
++                    if (item instanceof JSONObject object) {
++                        String message = extractGreetingObject(object);
++                        if (message != null) return message;
++                    }
++                }
++            }
++        } catch (Exception ignored) {
++            // 普通文本不是 JSON，继续交给常规校验。
++        }
++        return null;
++    }
++
++    private static String extractGreetingObject(JSONObject object) {
++        String direct = firstNonBlank(
++                object.optString("message", null),
++                object.optString("text", null),
++                object.optString("reply", null),
++                object.optString("output_text", null)
++        );
++        if (direct != null) return direct;
++
++        Object items = object.opt("items");
++        if (items instanceof JSONArray array && array.length() > 0) {
++            Object first = array.opt(0);
++            if (first instanceof String text) return text;
++            if (first instanceof JSONObject item) {
++                return firstNonBlank(
++                        item.optString("message", null),
++                        item.optString("text", null),
++                        item.optString("reply", null)
++                );
++            }
++        }
++        return null;
++    }
++
++    private static String firstNonBlank(String... values) {
++        if (values == null) return null;
++        for (String value : values) {
++            if (value != null && !value.isBlank()) return value;
++        }
++        return null;
++    }
++
++    private static String abbreviateForLog(String value, int maxLength) {
++        if (value == null) return "";
++        String normalized = value.replaceAll("\\s+", " ").trim();
++        return normalized.length() <= maxLength
++                ? normalized
++                : normalized.substring(0, Math.max(0, maxLength)) + "...";
++    }
++
+     private static Set<String> extractCandidateNames(String introduce) {
+         Set<String> names = new LinkedHashSet<>();
+         if (introduce == null || introduce.isBlank()) return names;
+@@ -534,25 +658,13 @@ public class AiService {
+ 
+         try {
+             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+-            if (response.statusCode() == 200) {
+-                JSONObject resp = new JSONObject(response.body());
+-                String outputText = resp.optString("output_text", null);
+-                if (outputText != null && !outputText.isEmpty()) {
+-                    return outputText;
+-                }
+-                // 兜底解析：部分兼容层可能返回 choices/message 结构
+-                try {
+-                    JSONObject messageObject = resp.getJSONArray("choices")
+-                            .getJSONObject(0)
+-                            .getJSONObject("message");
+-                    return messageObject.getString("content");
+-                } catch (Exception ignore) {
+-                }
+-                // 无法解析则直接返回原始体，避免空值中断流程
+-                return response.body();
++            if (response.statusCode() >= 200 && response.statusCode() < 300) {
++                return extractResponseContent(response.body(), endpoint);
+             }
+-            log.error("Responses API 调用失败: status={}, endpoint={}, body={}", response.statusCode(), endpoint, response.body());
+-            throw new RuntimeException("AI请求失败，状态码: " + response.statusCode() + ", 详情: " + response.body());
++            log.error("Responses API 调用失败: status={}, endpoint={}, body={}", response.statusCode(), endpoint,
++                    abbreviateForLog(response.body(), 500));
++            throw new RuntimeException("AI请求失败，状态码: " + response.statusCode()
++                    + ", 详情: " + abbreviateForLog(response.body(), 500));
+         } catch (Exception e) {
+             log.error("Responses API 调用异常", e);
+             throw e instanceof RuntimeException ? (RuntimeException) e : new RuntimeException(e);
+diff --git a/src/main/java/com/getjobs/application/service/Job51Service.java b/src/main/java/com/getjobs/application/service/Job51Service.java
+index 9fd8a5b..774e7a6 100644
+--- a/src/main/java/com/getjobs/application/service/Job51Service.java
++++ b/src/main/java/com/getjobs/application/service/Job51Service.java
+@@ -19,7 +19,9 @@ import java.sql.Connection;
+ import java.sql.Statement;
+ import java.time.LocalDateTime;
+ import java.util.ArrayList;
++import java.util.LinkedHashMap;
+ import java.util.List;
++import java.util.Map;
+ import java.util.stream.Collectors;
+ 
+ @Service
+@@ -287,9 +289,13 @@ public class Job51Service {
+                 new com.baomidou.mybatisplus.core.conditions.query.QueryWrapper<Job51Entity>().in("job_id", idList)
+         );
+         java.util.Set<Long> existingIds = new java.util.HashSet<>();
++        Map<Long, Job51Entity> existingById = new LinkedHashMap<>();
+         if (existing != null) {
+             for (Job51Entity e : existing) {
+-                if (e != null && e.getJobId() != null) existingIds.add(e.getJobId());
++                if (e != null && e.getJobId() != null) {
++                    existingIds.add(e.getJobId());
++                    existingById.put(e.getJobId(), e);
++                }
+             }
+         }
+ 
+@@ -304,34 +310,36 @@ public class Job51Service {
+             if (e.getDelivered() == null) e.setDelivered(0);
+             toInsert.add(e);
+         }
++        mergeExistingSnapshots(entities, existingById);
+         if (toInsert.isEmpty()) return;
+ 
+         String sql = "INSERT INTO job51_data (" +
+-                "job_id, job_title, job_link, job_salary_text, job_area, job_edu_req, job_exp_req, job_publish_time, " +
++                "job_id, job_title, job_link, job_description, job_salary_text, job_area, job_edu_req, job_exp_req, job_publish_time, " +
+                 "comp_id, comp_name, comp_industry, comp_scale, " +
+                 "hr_id, hr_name, hr_title, delivered, create_time, update_time" +
+-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
++                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+         try (Connection conn = dataSource.getConnection(); java.sql.PreparedStatement ps = conn.prepareStatement(sql)) {
+             conn.setAutoCommit(false);
+             for (Job51Entity e : toInsert) {
+                 if (e.getJobId() == null) ps.setNull(1, java.sql.Types.BIGINT); else ps.setLong(1, e.getJobId());
+                 if (e.getJobTitle() == null) ps.setNull(2, java.sql.Types.VARCHAR); else ps.setString(2, e.getJobTitle());
+                 if (e.getJobLink() == null) ps.setNull(3, java.sql.Types.VARCHAR); else ps.setString(3, e.getJobLink());
+-                if (e.getJobSalaryText() == null) ps.setNull(4, java.sql.Types.VARCHAR); else ps.setString(4, e.getJobSalaryText());
+-                if (e.getJobArea() == null) ps.setNull(5, java.sql.Types.VARCHAR); else ps.setString(5, e.getJobArea());
+-                if (e.getJobEduReq() == null) ps.setNull(6, java.sql.Types.VARCHAR); else ps.setString(6, e.getJobEduReq());
+-                if (e.getJobExpReq() == null) ps.setNull(7, java.sql.Types.VARCHAR); else ps.setString(7, e.getJobExpReq());
+-                if (e.getJobPublishTime() == null) ps.setNull(8, java.sql.Types.VARCHAR); else ps.setString(8, e.getJobPublishTime());
+-                if (e.getCompId() == null) ps.setNull(9, java.sql.Types.BIGINT); else ps.setLong(9, e.getCompId());
+-                if (e.getCompName() == null) ps.setNull(10, java.sql.Types.VARCHAR); else ps.setString(10, e.getCompName());
+-                if (e.getCompIndustry() == null) ps.setNull(11, java.sql.Types.VARCHAR); else ps.setString(11, e.getCompIndustry());
+-                if (e.getCompScale() == null) ps.setNull(12, java.sql.Types.VARCHAR); else ps.setString(12, e.getCompScale());
+-                if (e.getHrId() == null) ps.setNull(13, java.sql.Types.VARCHAR); else ps.setString(13, e.getHrId());
+-                if (e.getHrName() == null) ps.setNull(14, java.sql.Types.VARCHAR); else ps.setString(14, e.getHrName());
+-                if (e.getHrTitle() == null) ps.setNull(15, java.sql.Types.VARCHAR); else ps.setString(15, e.getHrTitle());
+-                if (e.getDelivered() == null) ps.setNull(16, java.sql.Types.INTEGER); else ps.setInt(16, e.getDelivered());
+-                if (e.getCreateTime() == null) ps.setNull(17, java.sql.Types.VARCHAR); else ps.setString(17, e.getCreateTime());
+-                if (e.getUpdateTime() == null) ps.setNull(18, java.sql.Types.VARCHAR); else ps.setString(18, e.getUpdateTime());
++                if (e.getJobDescription() == null) ps.setNull(4, java.sql.Types.VARCHAR); else ps.setString(4, e.getJobDescription());
++                if (e.getJobSalaryText() == null) ps.setNull(5, java.sql.Types.VARCHAR); else ps.setString(5, e.getJobSalaryText());
++                if (e.getJobArea() == null) ps.setNull(6, java.sql.Types.VARCHAR); else ps.setString(6, e.getJobArea());
++                if (e.getJobEduReq() == null) ps.setNull(7, java.sql.Types.VARCHAR); else ps.setString(7, e.getJobEduReq());
++                if (e.getJobExpReq() == null) ps.setNull(8, java.sql.Types.VARCHAR); else ps.setString(8, e.getJobExpReq());
++                if (e.getJobPublishTime() == null) ps.setNull(9, java.sql.Types.VARCHAR); else ps.setString(9, e.getJobPublishTime());
++                if (e.getCompId() == null) ps.setNull(10, java.sql.Types.BIGINT); else ps.setLong(10, e.getCompId());
++                if (e.getCompName() == null) ps.setNull(11, java.sql.Types.VARCHAR); else ps.setString(11, e.getCompName());
++                if (e.getCompIndustry() == null) ps.setNull(12, java.sql.Types.VARCHAR); else ps.setString(12, e.getCompIndustry());
++                if (e.getCompScale() == null) ps.setNull(13, java.sql.Types.VARCHAR); else ps.setString(13, e.getCompScale());
++                if (e.getHrId() == null) ps.setNull(14, java.sql.Types.VARCHAR); else ps.setString(14, e.getHrId());
++                if (e.getHrName() == null) ps.setNull(15, java.sql.Types.VARCHAR); else ps.setString(15, e.getHrName());
++                if (e.getHrTitle() == null) ps.setNull(16, java.sql.Types.VARCHAR); else ps.setString(16, e.getHrTitle());
++                if (e.getDelivered() == null) ps.setNull(17, java.sql.Types.INTEGER); else ps.setInt(17, e.getDelivered());
++                if (e.getCreateTime() == null) ps.setNull(18, java.sql.Types.VARCHAR); else ps.setString(18, e.getCreateTime());
++                if (e.getUpdateTime() == null) ps.setNull(19, java.sql.Types.VARCHAR); else ps.setString(19, e.getUpdateTime());
+                 ps.addBatch();
+             }
+             ps.executeBatch();
+@@ -341,85 +349,211 @@ public class Job51Service {
+         }
+     }
+ 
++    /** 只补齐旧快照里缺少的 JD/链接，不触碰投递和打招呼状态。 */
++    private void mergeExistingSnapshots(List<Job51Entity> incoming, Map<Long, Job51Entity> existingById) {
++        if (incoming == null || incoming.isEmpty() || existingById == null || existingById.isEmpty()) return;
++        try (Connection conn = dataSource.getConnection()) {
++            String now = LocalDateTime.now().toString();
++            for (Job51Entity next : incoming) {
++                if (next == null || next.getJobId() == null) continue;
++                Job51Entity current = existingById.get(next.getJobId());
++                if (current == null) continue;
++
++                boolean fillDescription = isBlank(current.getJobDescription())
++                        && !isBlank(next.getJobDescription());
++                boolean fillLink = isBlank(current.getJobLink())
++                        && !isBlank(next.getJobLink());
++                if (!fillDescription && !fillLink) continue;
++
++                StringBuilder sql = new StringBuilder("UPDATE job51_data SET ");
++                List<Object> values = new ArrayList<>();
++                if (fillDescription) {
++                    sql.append("job_description=?,");
++                    values.add(next.getJobDescription().trim());
++                }
++                if (fillLink) {
++                    sql.append("job_link=?,");
++                    values.add(next.getJobLink().trim());
++                }
++                sql.append("update_time=? WHERE job_id=?");
++                values.add(now);
++                values.add(next.getJobId());
++
++                try (java.sql.PreparedStatement ps = conn.prepareStatement(sql.toString())) {
++                    for (int i = 0; i < values.size(); i++) {
++                        Object value = values.get(i);
++                        if (value instanceof Long id) ps.setLong(i + 1, id);
++                        else ps.setString(i + 1, String.valueOf(value));
++                    }
++                    ps.executeUpdate();
++                }
++            }
++        } catch (Exception e) {
++            log.warn("合并 51job 岗位快照失败: {}", e.getMessage());
++        }
++    }
++
++    private static boolean isBlank(String value) {
++        return value == null || value.isBlank();
++    }
++
+     /** 解析 51job 搜索接口返回 JSON，并批量保存 */
+     public void parseAndPersistJob51SearchJson(String json) {
+-        if (json == null || json.isEmpty()) return;
+-        String trimmed = json.trim();
+-        // 非JSON：可能是访问验证页面，直接跳过并打印诊断
+-        if (trimmed.startsWith("<")) {
+-            // 静默跳过非JSON（可能是访问验证页面）
+-            return;
++        try {
++            List<Job51Entity> entities = parseSearchEntities(json);
++            batchInsertIfNotExists(entities);
++        } catch (Exception e) {
++            log.warn("解析 51job 搜索 JSON 失败: {}", e.getMessage());
+         }
++    }
++
++    /** 将搜索接口的多种列表形态统一成岗位快照，供生产代码和回归测试复用。 */
++    static List<Job51Entity> parseSearchEntities(String json) {
++        List<Job51Entity> entities = new ArrayList<>();
++        if (json == null || json.isBlank() || json.trim().startsWith("<")) return entities;
+         try {
+             com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+             com.fasterxml.jackson.databind.JsonNode root = mapper.readTree(json);
++            com.fasterxml.jackson.databind.JsonNode list = findJobList(root);
++            if (!list.isArray()) return entities;
+ 
+-            // 兼容多种列表命名，新增 resultbody.job.items（根据现场日志）
+-            com.fasterxml.jackson.databind.JsonNode list = root.path("data").path("items");
+-            if (!list.isArray()) list = root.path("data").path("jobList");
+-            if (!list.isArray()) list = root.path("data").path("list");
+-            if (!list.isArray()) list = root.path("data").path("jobs");
+-            if (!list.isArray()) list = root.path("resultbody").path("job").path("items");
+-            if (!list.isArray()) list = root.path("job").path("items");
+-            if (!list.isArray()) list = root.path("resultbody").path("items");
+-            if (!list.isArray()) {
+-                // 静默跳过不兼容结构
+-                return;
+-            }
+-
+-            java.util.List<Job51Entity> entities = new java.util.ArrayList<>();
+             for (com.fasterxml.jackson.databind.JsonNode item : list) {
+-                Long jobId = readLong(item.path("jobId"));
++                Long jobId = readJobId(item);
+                 if (jobId == null) continue;
+ 
+-                Job51Entity e = new Job51Entity();
+-                e.setJobId(jobId);
+-                // 名称/薪资/地区/学历/经验/发布时间 映射增强
+-                e.setJobTitle(readText(item, "jobName", "jobTitle", "title"));
+-                e.setJobSalaryText(readText(item, "provideSalaryString", "salaryDesc", "salary", "salaryText"));
+-                e.setJobArea(readText(item, "jobAreaString", "jobArea", "cityName"));
+-                e.setJobEduReq(readText(item, "degreeString", "degree", "requireEduLevel"));
+-                e.setJobExpReq(readText(item, "workYearString", "workYear", "requireWorkYears"));
+-                e.setJobPublishTime(readText(item, "issueDateString", "issueDate", "updateDate", "refreshTime"));
+-
+-                // 公司维度
+-                e.setCompId(readLong(item.path("ctmId"), item.path("companyId")));
+-                e.setCompName(readText(item, "fullCompanyName", "companyName", "ctmName"));
+-                e.setCompIndustry(readText(item, "industryType1Str", "industry", "compIndustry"));
+-                e.setCompScale(readText(item, "companySizeString", "companySize", "compScale"));
+-
+-                // HR维度
+-                e.setHrId(readText(item, "hrUid", "recruiterId"));
+-                e.setHrName(readText(item, "hrName", "recruiterName"));
+-                e.setHrTitle(readText(item, "hrPosition", "recruiterTitle"));
+-
+-                // 职位链接：优先使用官方给出的 jobHref，其次构造 PC 链接
+-                String jobHref = readText(item, "jobHref");
+-                if (jobHref == null || jobHref.isEmpty()) {
+-                    jobHref = "https://we.51job.com/pc/jobdetail?jobId=" + jobId;
++                Job51Entity entity = new Job51Entity();
++                entity.setJobId(jobId);
++                entity.setJobTitle(readFirstText(item, "jobName", "jobTitle", "title"));
++                entity.setJobDescription(readFirstText(item,
++                        "jobDescription", "jobDesc", "postDescription", "description",
++                        "jobIntro", "jobDuty", "jobRequirement", "requirement"));
++                entity.setJobSalaryText(readFirstText(item,
++                        "provideSalaryString", "salaryDesc", "salary", "salaryText"));
++                entity.setJobArea(readFirstText(item, "jobAreaString", "jobArea", "cityName"));
++                entity.setJobEduReq(readFirstText(item, "degreeString", "degree", "requireEduLevel"));
++                entity.setJobExpReq(readFirstText(item, "workYearString", "workYear", "requireWorkYears"));
++                entity.setJobPublishTime(readFirstText(item,
++                        "issueDateString", "issueDate", "updateDate", "refreshTime"));
++
++                entity.setCompId(readLong(item.path("ctmId"), item.path("companyId"),
++                        item.path("company").path("companyId"), item.path("companyInfo").path("companyId")));
++                entity.setCompName(readFirstText(item, "fullCompanyName", "companyName", "ctmName"));
++                entity.setCompIndustry(readFirstText(item, "industryType1Str", "industry", "compIndustry"));
++                entity.setCompScale(readFirstText(item, "companySizeString", "companySize", "compScale"));
++
++                entity.setHrId(readFirstText(item, "hrUid", "recruiterId"));
++                entity.setHrName(readFirstText(item, "hrName", "recruiterName"));
++                entity.setHrTitle(readFirstText(item, "hrPosition", "recruiterTitle"));
++
++                String jobHref = readFirstText(item, "jobHref", "jobLink", "jobUrl", "url");
++                entity.setJobLink(jobHref == null
++                        ? "https://we.51job.com/pc/jobdetail?jobId=" + jobId
++                        : jobHref);
++                entities.add(entity);
++            }
++        } catch (Exception e) {
++            log.warn("构造 51job 搜索岗位快照失败: {}", e.getMessage());
++        }
++        return entities;
++    }
++
++    private static com.fasterxml.jackson.databind.JsonNode findJobList(
++            com.fasterxml.jackson.databind.JsonNode root) {
++        String[][] paths = {
++                {"data", "items"}, {"data", "jobList"}, {"data", "list"}, {"data", "jobs"},
++                {"data", "results"}, {"data", "resultbody", "job", "items"},
++                {"data", "resultbody", "items"}, {"data", "job", "items"}, {"data", "job"},
++                {"resultbody", "job", "items"}, {"resultbody", "jobList"}, {"resultbody", "items"},
++                {"job", "items"}, {"items"}, {"list"}, {"results"}
++        };
++        for (String[] path : paths) {
++            com.fasterxml.jackson.databind.JsonNode node = root;
++            for (String part : path) node = node.path(part);
++            if (node.isArray()) return node;
++        }
++        return findArrayByKey(root);
++    }
++
++    private static com.fasterxml.jackson.databind.JsonNode findArrayByKey(
++            com.fasterxml.jackson.databind.JsonNode node) {
++        if (node == null || node.isNull()) return node;
++        if (node.isObject()) {
++            java.util.Iterator<Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>> fields = node.fields();
++            while (fields.hasNext()) {
++                Map.Entry<String, com.fasterxml.jackson.databind.JsonNode> field = fields.next();
++                String key = field.getKey().toLowerCase(java.util.Locale.ROOT).replaceAll("[_-]", "");
++                com.fasterxml.jackson.databind.JsonNode value = field.getValue();
++                if ((key.equals("items") || key.equals("joblist") || key.equals("jobs")
++                        || key.equals("results") || key.equals("list")) && value.isArray()) {
++                    return value;
+                 }
+-                e.setJobLink(jobHref);
++            }
++            fields = node.fields();
++            while (fields.hasNext()) {
++                com.fasterxml.jackson.databind.JsonNode nested = findArrayByKey(fields.next().getValue());
++                if (nested != null && nested.isArray()) return nested;
++            }
++        } else if (node.isArray()) {
++            for (com.fasterxml.jackson.databind.JsonNode child : node) {
++                com.fasterxml.jackson.databind.JsonNode nested = findArrayByKey(child);
++                if (nested != null && nested.isArray()) return nested;
++            }
++        }
++        return node.path("missing");
++    }
+ 
+-                entities.add(e);
++    private static Long readJobId(com.fasterxml.jackson.databind.JsonNode item) {
++        if (item == null || item.isNull() || item.isMissingNode()) return null;
++        String[] directKeys = {"jobId", "job_id", "jobID", "jobid", "jobIdStr"};
++        Long direct = readLongFromKeys(item, directKeys);
++        if (direct != null) return direct;
++        String[] nestedKeys = {"jobInfo", "jobDetail", "job", "detail", "position", "jobData"};
++        for (String key : nestedKeys) {
++            Long nested = readJobId(item.path(key));
++            if (nested != null) return nested;
++        }
++        return null;
++    }
++
++    private static Long readLongFromKeys(com.fasterxml.jackson.databind.JsonNode item, String... keys) {
++        for (String key : keys) {
++            Long value = readLong(item.path(key));
++            if (value != null && value > 0) return value;
++        }
++        return null;
++    }
++
++    private static String readFirstText(com.fasterxml.jackson.databind.JsonNode item, String... keys) {
++        String direct = readText(item, keys);
++        if (direct != null) return direct;
++        String[] nested = {"jobInfo", "jobDetail", "job", "detail", "position", "jobData",
++                "company", "companyInfo", "enterprise", "recruiter"};
++        for (String name : nested) {
++            com.fasterxml.jackson.databind.JsonNode child = item.path(name);
++            if (child.isObject()) {
++                String value = readText(child, keys);
++                if (value != null) return value;
+             }
+-            batchInsertIfNotExists(entities);
+-            // 静默写库
+-        } catch (Exception e) {
+-            // 静默错误
+         }
++        return null;
+     }
+ 
+     // 读取辅助
+     private static String readText(com.fasterxml.jackson.databind.JsonNode item, String... keys) {
+         for (String k : keys) {
+             String v = safeText(item.path(k));
+-            if (v != null && !v.isEmpty()) return v;
++            if (v != null && !v.isBlank()) return v.trim();
+         }
+         return null;
+     }
+ 
+     private static String safeText(com.fasterxml.jackson.databind.JsonNode node) {
+-        try { String v = node.asText(null); return (v == null || v.equals("null")) ? null : v; } catch (Exception ignored) { return null; }
++        try {
++            String v = node.asText(null);
++            return (v == null || v.equals("null") || v.isBlank()) ? null : v.trim();
++        } catch (Exception ignored) {
++            return null;
++        }
+     }
+ 
+     private static Long readLong(com.fasterxml.jackson.databind.JsonNode... nodes) {
+@@ -428,7 +562,8 @@ public class Job51Service {
+                 if (n == null) continue;
+                 String v = n.asText(null);
+                 if (v != null && !v.isEmpty() && !"null".equalsIgnoreCase(v)) {
+-                    return Long.parseLong(v);
++                    long value = Long.parseLong(v.trim());
++                    return value > 0 ? value : null;
+                 }
+             } catch (Exception ignored) {}
+         }
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51.java b/src/main/java/com/getjobs/worker/job51/Job51.java
+index a26f577..cf88d6d 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51.java
+@@ -84,6 +84,8 @@ public class Job51 {
+     private static final int DEFAULT_MAX_PAGE = 50;
+     private static final String BASE_URL = "https://we.51job.com/pc/search?";
+     private static final long DETAIL_TIMEOUT_MS = 15000L;
++    private static final long JD_WAIT_TIMEOUT_MS = 10000L;
++    private static final int MIN_JOB_DESCRIPTION_LENGTH = 20;
+     private static final long MESSAGE_CONFIRM_TIMEOUT_MS = 12000L;
+ 
+     /**
+@@ -211,68 +213,13 @@ public class Job51 {
+         try {
+             // 收敛日志：不输出关键词级日志，仅保留页级摘要
+ 
+-            // 在跳转前监听 51job 搜索接口，抓取 JSON 并保存到数据库 + 打印诊断日志
++            // 在跳转前监听搜索接口，AI与普通投递共用同一套快照解析。
+             if (!networkHooked) {
+                 try {
+-                    page.onResponse(r -> {
+-                        try {
+-                            String url = r.url();
+-                            if (url != null && url.contains("/api/job/search-pc") && "GET".equalsIgnoreCase(r.request().method())) {
+-                                int status = 0;
+-                                try { status = r.status(); } catch (Throwable ignored) {}
+-                                String text = null;
+-                                try { text = r.text(); } catch (Throwable ignored) {}
+-                                int len = text == null ? 0 : text.length();
+-                                // 基于 URL 的 requestId 做去重，避免重复解析
+-                                String requestId = null;
+-                                try {
+-                                    java.net.URI u = new java.net.URI(url);
+-                                    String q = u.getQuery();
+-                                    if (q != null) {
+-                                        for (String part : q.split("&")) {
+-                                            int i = part.indexOf('=');
+-                                            if (i > 0 && "requestId".equals(part.substring(0, i))) {
+-                                                requestId = java.net.URLDecoder.decode(part.substring(i + 1), java.nio.charset.StandardCharsets.UTF_8);
+-                                                break;
+-                                            }
+-                                        }
+-                                    }
+-                                } catch (Exception ignored) {}
+-                                if (requestId != null && !requestId.isBlank() && processedRequestIds.contains(requestId)) {
+-                                    return;
+-                                }
+-                                if (text != null) {
+-                                    // 根据 Content-Type 粗判是否为 JSON
+-                                    boolean isJson = false;
+-                                    try {
+-                                        java.util.Map<String, String> headers = r.headers();
+-                                        if (headers != null) {
+-                                            String ct = headers.getOrDefault("content-type", headers.get("Content-Type"));
+-                                            if (ct != null && ct.toLowerCase().contains("json")) isJson = true;
+-                                        }
+-                                    } catch (Throwable ignored) {}
+-                                    if (isJson) {
+-                                        // 解析并保存到数据库
+-                                        job51Service.parseAndPersistJob51SearchJson(text);
+-                                        // 📋 提取当前页的jobId列表并缓存
+-                                        List<Long> jobIds = extractJobIdsFromJson(text);
+-                                        if (jobIds != null && !jobIds.isEmpty()) {
+-                                            synchronized (currentPageJobIds) {
+-                                                currentPageJobIds.clear();
+-                                                currentPageJobIds.addAll(jobIds);
+-                                            }
+-                                        }
+-                                        if (requestId != null && !requestId.isBlank()) processedRequestIds.add(requestId);
+-                                    } // 非JSON静默跳过
+-                                }
+-                            }
+-                        } catch (Throwable e) {
+-                            // 静默错误
+-                        }
+-                    });
++                    page.onResponse(this::captureSearchResponse);
+                     networkHooked = true;
+                 } catch (Throwable e) {
+-                    // 静默错误
++                    log.debug("51job搜索响应监听注册失败: {}", e.getMessage());
+                 }
+             }
+ 
+@@ -389,21 +336,28 @@ public class Job51 {
+             if (url == null || !url.contains("/api/job/search-pc")
+                     || !"GET".equalsIgnoreCase(response.request().method())) return;
+ 
++            int status = response.status();
++
+             String text = null;
+             try {
+                 text = response.text();
+             } catch (Throwable ignored) {
+             }
+-            if (text == null || text.isBlank()) return;
++            if (status < 200 || status >= 300) {
++                log.warn("[51job] 搜索接口响应异常 status={}, bodyLength={}", status,
++                        text == null ? 0 : text.length());
++                return;
++            }
++            if (text == null || text.isBlank()) {
++                log.warn("[51job] 搜索接口响应为空 status={}", status);
++                return;
++            }
+ 
+-            boolean isJson = false;
+-            try {
+-                java.util.Map<String, String> headers = response.headers();
+-                String contentType = headers == null ? null : headers.getOrDefault("content-type", headers.get("Content-Type"));
+-                isJson = contentType != null && contentType.toLowerCase(Locale.ROOT).contains("json");
+-            } catch (Throwable ignored) {
++            if (!looksLikeJson(text, response.headers())) {
++                log.warn("[51job] 搜索接口响应不是可解析 JSON，contentType={}, bodyLength={}",
++                        response.headers().get("content-type"), text.length());
++                return;
+             }
+-            if (!isJson) return;
+ 
+             String requestId = null;
+             try {
+@@ -430,9 +384,24 @@ public class Job51 {
+                     currentPageJobIds.addAll(jobIds);
+                 }
+             }
++            log.info("[51job] 搜索快照解析完成 jobIds={}, bodyLength={}",
++                    jobIds.size(), text.length());
+             if (requestId != null && !requestId.isBlank()) processedRequestIds.add(requestId);
+-        } catch (Throwable ignored) {
+-            // 页面关闭期间响应回调可能晚到，忽略单次回调错误。
++        } catch (Throwable e) {
++            log.debug("51job搜索响应解析失败: {}", e.getMessage());
++        }
++    }
++
++    static boolean looksLikeJson(String text, java.util.Map<String, String> headers) {
++        if (text == null || text.isBlank()) return false;
++        try {
++            String contentType = headers == null ? null
++                    : headers.getOrDefault("content-type", headers.get("Content-Type"));
++            if (contentType != null && contentType.toLowerCase(Locale.ROOT).contains("json")) return true;
++            new com.fasterxml.jackson.databind.ObjectMapper().readTree(text);
++            return true;
++        } catch (Exception ignored) {
++            return false;
+         }
+     }
+ 
+@@ -555,32 +524,35 @@ public class Job51 {
+ 
+             detailPage = page.context().newPage();
+             detailPage.setDefaultTimeout(10000);
+-            detailPage.navigate(link, new Page.NavigateOptions()
+-                    .setTimeout(DETAIL_TIMEOUT_MS)
+-                    .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
+-            try {
+-                detailPage.waitForLoadState(LoadState.DOMCONTENTLOADED,
+-                        new Page.WaitForLoadStateOptions().setTimeout(10000));
+-            } catch (Exception ignored) {
++            if (!navigateDetailPage(detailPage, entity.getJobId(), link)) {
++                String reason = checkAccessVerification(detailPage) || checkNeedLogin(detailPage)
++                        ? "detail_blocked" : "detail_navigation_failed";
++                markGreetingSkipped(entity.getJobId(), reason);
++                sendProgress(String.format("跳过%s：详情页加载失败（%s）", title, reason), null, null);
++                return AiJobOutcome.SKIPPED;
+             }
+ 
+-            String jd = entity.getJobDescription();
+-            if (jd == null || jd.isBlank()) jd = extractJobDescription(detailPage);
+-            if (jd == null || jd.isBlank()) {
+-                markGreetingSkipped(entity.getJobId(), "jd_missing");
+-                sendProgress(String.format("跳过%s：未读取到岗位JD", title), null, null);
++            JobDescriptionResult description = resolveJobDescription(detailPage, entity.getJobDescription());
++            if (!description.usable()) {
++                markGreetingSkipped(entity.getJobId(), description.reason());
++                sendProgress(String.format("跳过%s：岗位JD获取失败（%s）", title, description.reason()), null, null);
+                 return AiJobOutcome.SKIPPED;
+             }
+-            if (entity.getJobDescription() == null || !jd.equals(entity.getJobDescription())) {
++            String jd = description.text();
++            if (!jd.equals(normalizeJobDescription(entity.getJobDescription()))) {
+                 entity.setJobDescription(jd);
+                 job51Service.updateJobDescription(entity.getJobId(), jd);
++                log.info("[51job] JD读取成功 job_id={}, source={}, length={}",
++                        entity.getJobId(), description.source(), jd.length());
+             }
+ 
+             AiGreetingResult aiResult = generateAiGreeting(keyword, title, jd);
+             if (!isUsableAiGreeting(aiResult)) {
+-                String reason = aiResult != null && aiResult.rejected() ? "ai_rejected" : "ai_empty_or_failed";
++                String reason = aiResult == null || aiResult.reason() == null
++                        ? "ai_response_invalid" : aiResult.reason();
+                 markGreetingSkipped(entity.getJobId(), reason);
+-                sendProgress(String.format("跳过%s：AI未生成有效打招呼语", title), null, null);
++                int attempts = aiResult == null ? 0 : aiResult.attempts();
++                sendProgress(String.format("跳过%s：AI回复无效（%s，尝试%d次）", title, reason, attempts), null, null);
+                 return AiJobOutcome.SKIPPED;
+             }
+ 
+@@ -593,8 +565,9 @@ public class Job51 {
+             return AiJobOutcome.SENT;
+         } catch (Exception e) {
+             if (isTargetClosedFailure(e)) throw propagate(e);
+-            markGreetingSkipped(entity.getJobId(), "ai_or_detail_error: " + messageOf(e, "unknown"));
+-            log.warn("51job AI岗位处理失败 job_id={} title={}: {}", entity.getJobId(), title, e.getMessage());
++            markGreetingSkipped(entity.getJobId(), "job_processing_error");
++            log.warn("51job AI岗位处理失败 job_id={} title={} reason={}",
++                    entity.getJobId(), title, messageOf(e, "unknown"));
+             return AiJobOutcome.SKIPPED;
+         } finally {
+             if (detailPage != null) {
+@@ -687,7 +660,79 @@ public class Job51 {
+         return value.startsWith("http://") || value.startsWith("https://") ? value : null;
+     }
+ 
+-    private String extractJobDescription(Page detailPage) {
++    private boolean navigateDetailPage(Page detailPage, Long jobId, String storedLink) {
++        for (String link : detailLinkCandidates(jobId, storedLink)) {
++            try {
++                Response response = detailPage.navigate(link, new Page.NavigateOptions()
++                        .setTimeout(DETAIL_TIMEOUT_MS)
++                        .setWaitUntil(WaitUntilState.DOMCONTENTLOADED));
++                if (response != null && (response.status() < 200 || response.status() >= 300)) {
++                    log.warn("[51job] 详情页响应异常 job_id={} status={} link={}",
++                            jobId, response.status(), link);
++                    continue;
++                }
++                try {
++                    detailPage.waitForLoadState(LoadState.DOMCONTENTLOADED,
++                            new Page.WaitForLoadStateOptions().setTimeout(10000));
++                } catch (Exception ignored) {
++                }
++                if (checkAccessVerification(detailPage) || checkNeedLogin(detailPage)) {
++                    log.warn("[51job] 详情页出现登录或访问验证 job_id={} link={}", jobId, link);
++                    continue;
++                }
++                return true;
++            } catch (Exception e) {
++                if (isTargetClosedFailure(e)) throw propagate(e);
++                log.warn("[51job] 详情页导航失败 job_id={} link={} reason={}",
++                        jobId, link, messageOf(e, "unknown"));
++            }
++        }
++        return false;
++    }
++
++    private List<String> detailLinkCandidates(Long jobId, String storedLink) {
++        java.util.LinkedHashSet<String> links = new java.util.LinkedHashSet<>();
++        String normalized = normalizeJobLink(storedLink);
++        if (normalized != null) links.add(normalized);
++        if (jobId != null) {
++            links.add("https://we.51job.com/pc/jobdetail?jobId=" + jobId);
++        }
++        return new ArrayList<>(links);
++    }
++
++    private JobDescriptionResult resolveJobDescription(Page detailPage, String cached) {
++        String cachedText = normalizeJobDescription(cached);
++        if (isUsableJobDescription(cachedText)) {
++            return new JobDescriptionResult(cachedText, "cache", "ok");
++        }
++
++        long deadline = System.currentTimeMillis() + JD_WAIT_TIMEOUT_MS;
++        while (System.currentTimeMillis() < deadline) {
++            String dom = extractDescriptionFromDom(detailPage);
++            if (isUsableJobDescription(dom)) {
++                return new JobDescriptionResult(dom, "dom", "ok");
++            }
++            try {
++                detailPage.waitForTimeout(250);
++            } catch (Exception e) {
++                if (isTargetClosedFailure(e)) throw propagate(e);
++                break;
++            }
++        }
++
++        String embedded = extractEmbeddedJobDescription(detailPage);
++        if (isUsableJobDescription(embedded)) {
++            return new JobDescriptionResult(embedded, "embedded_json", "ok");
++        }
++
++        String body = extractMarkedDescription(detailPage);
++        if (isUsableJobDescription(body)) {
++            return new JobDescriptionResult(body, "body_section", "ok");
++        }
++        return new JobDescriptionResult(null, "none", "jd_missing");
++    }
++
++    private String extractDescriptionFromDom(Page detailPage) {
+         for (String selector : Job51Locators.DESCRIPTION_SELECTORS) {
+             Locator candidates = detailPage.locator(selector);
+             for (int i = 0; i < Math.min(candidates.count(), 5); i++) {
+@@ -695,22 +740,108 @@ public class Job51 {
+                     Locator candidate = candidates.nth(i);
+                     if (!candidate.isVisible()) continue;
+                     String text = normalizeJobDescription(candidate.innerText());
+-                    if (text != null && text.length() >= 20) return text;
++                    if (isUsableJobDescription(text)) return text;
+                 } catch (Exception ignored) {
+                 }
+             }
+         }
++        return null;
++    }
++
++    private String extractEmbeddedJobDescription(Page detailPage) {
+         try {
+-            String body = normalizeJobDescription(detailPage.locator("body").innerText());
+-            if (body != null && (body.contains("职位描述") || body.contains("岗位职责") || body.contains("任职要求"))) return body;
++            Locator scripts = detailPage.locator(
++                    "script[type='application/ld+json'], script#__NEXT_DATA__, script[type='application/json']");
++            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
++            for (int i = 0; i < Math.min(scripts.count(), 30); i++) {
++                String content = scripts.nth(i).textContent();
++                if (content == null || content.isBlank()) continue;
++                try {
++                    String result = findEmbeddedDescription(mapper.readTree(content));
++                    if (isUsableJobDescription(result)) return result;
++                } catch (Exception ignored) {
++                }
++            }
+         } catch (Exception ignored) {
+         }
+         return null;
+     }
+ 
++    private String findEmbeddedDescription(com.fasterxml.jackson.databind.JsonNode node) {
++        if (node == null || node.isNull()) return null;
++        if (node.isObject()) {
++            java.util.Iterator<java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>> fields = node.fields();
++            while (fields.hasNext()) {
++                java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode> field = fields.next();
++                String key = field.getKey().toLowerCase(Locale.ROOT).replace("_", "");
++                com.fasterxml.jackson.databind.JsonNode value = field.getValue();
++                if (isDescriptionKey(key) && value.isTextual()) {
++                    String result = normalizeJobDescription(value.asText());
++                    if (isUsableJobDescription(result)) return result;
++                }
++                String nested = findEmbeddedDescription(value);
++                if (isUsableJobDescription(nested)) return nested;
++            }
++        } else if (node.isArray()) {
++            for (com.fasterxml.jackson.databind.JsonNode child : node) {
++                String nested = findEmbeddedDescription(child);
++                if (isUsableJobDescription(nested)) return nested;
++            }
++        }
++        return null;
++    }
++
++    private boolean isDescriptionKey(String key) {
++        return key.equals("jobdescription") || key.equals("jobdesc")
++                || key.equals("postdescription") || key.equals("jobintro")
++                || key.equals("jobduty") || key.equals("jobrequirement")
++                || key.equals("requirement") || key.equals("responsibility");
++    }
++
++    private String extractMarkedDescription(Page detailPage) {
++        try {
++            String body = normalizeJobDescription(detailPage.locator("body").innerText());
++            if (body == null) return null;
++            String[] starts = {"职位描述", "岗位职责", "工作内容"};
++            String[] ends = {"任职要求", "任职资格", "职位要求", "福利待遇", "公司信息"};
++            int start = firstMarkerIndex(body, starts);
++            if (start < 0) return null;
++            int contentStart = start;
++            int end = firstMarkerIndex(body, ends, start + 1);
++            String section = end > contentStart ? body.substring(contentStart, end) : body.substring(contentStart);
++            return normalizeJobDescription(section);
++        } catch (Exception ignored) {
++            return null;
++        }
++    }
++
++    private int firstMarkerIndex(String text, String[] markers) {
++        return firstMarkerIndex(text, markers, 0);
++    }
++
++    private int firstMarkerIndex(String text, String[] markers, int fromIndex) {
++        int result = -1;
++        for (String marker : markers) {
++            int index = text.indexOf(marker, fromIndex);
++            if (index >= 0 && (result < 0 || index < result)) result = index;
++        }
++        return result;
++    }
++
++    private boolean isUsableJobDescription(String text) {
++        return text != null && text.length() >= MIN_JOB_DESCRIPTION_LENGTH
++                && !text.contains("访问验证") && !text.contains("请按住滑块")
++                && !text.equals("登录");
++    }
++
+     private String normalizeJobDescription(String text) {
+         if (text == null) return null;
+-        String value = text.replace('\u00A0', ' ').replaceAll("[\\t\\r ]+", " ").trim();
++        String value = text.replace('\u00A0', ' ')
++                .replace("\r\n", "\n")
++                .replace('\r', '\n')
++                .replaceAll("[\\t ]+", " ")
++                .replaceAll("\\n{2,}", "\\n")
++                .trim();
+         return value.isBlank() ? null : value;
+     }
+ 
+@@ -719,27 +850,96 @@ public class Job51 {
+             AiEntity aiConfig = aiService.getAiConfig();
+             String introduce = aiConfig == null || aiConfig.getIntroduce() == null ? "" : aiConfig.getIntroduce();
+             String prompt = aiConfig == null ? null : aiConfig.getPrompt();
+-            if (prompt == null || prompt.isBlank()) return new AiGreetingResult(null, false);
++            if (prompt == null || prompt.isBlank()) {
++                return new AiGreetingResult(null, false, "ai_prompt_missing", 0);
++            }
+             String request = aiService.renderPrompt(prompt, introduce, keyword, jobName, jd, "");
+-            AiGreetingResult classified = classifyAiResponse(aiService.sendRequest(request));
+-            if (classified.rejected()) return classified;
+-            AiService.GreetingValidation validation = AiService.validateGreeting(classified.message(), introduce);
+-            return validation.usable()
+-                    ? new AiGreetingResult(validation.message(), false)
+-                    : new AiGreetingResult(null, false);
++            String repairRequest = request + "\n上次输出未通过格式校验，请只返回一条单行最终话术：必须以指定前缀开头，排除姓名和命名表达，长度不超过60字。";
++            String lastReason = "ai_response_invalid";
++            int attemptsUsed = 0;
++            for (int attempt = 1; attempt <= 2; attempt++) {
++                attemptsUsed = attempt;
++                try {
++                    String raw = aiService.sendRequest(attempt == 1 ? request : repairRequest);
++                    AiGreetingResult classified = classifyAiResponse(raw);
++                    if (classified.rejected()) {
++                        return new AiGreetingResult(null, true, "ai_rejected", attempt);
++                    }
++                    AiService.GreetingValidation validation = AiService.validateGreeting(
++                            classified.message(), introduce);
++                    if (validation.usable()) {
++                        return new AiGreetingResult(validation.message(), false, "ok", attempt);
++                    }
++                    lastReason = "ai_" + validation.reason();
++                    log.warn("[51job] AI回复校验失败 attempt={} reason={} rawLength={}",
++                            attempt, lastReason, raw == null ? 0 : raw.length());
++                    if (attempt == 1 && shouldRetryAiReason(lastReason)) {
++                        waitForAiRetry();
++                        continue;
++                    }
++                    break;
++                } catch (Exception e) {
++                    lastReason = classifyAiFailure(e);
++                    log.warn("[51job] AI请求失败 attempt={} reason={}", attempt, lastReason);
++                    if (attempt == 1 && isRetryableAiFailure(e)) {
++                        waitForAiRetry();
++                        continue;
++                    }
++                    break;
++                }
++            }
++            return new AiGreetingResult(null, false, lastReason, attemptsUsed);
++        } catch (IllegalArgumentException e) {
++            log.warn("[51job] AI提示词配置无效: {}", e.getMessage());
++            return new AiGreetingResult(null, false, "ai_prompt_error", 0);
+         } catch (Exception e) {
+-            log.warn("51job AI请求失败，跳过当前岗位：{}", e.getMessage());
+-            return new AiGreetingResult(null, false);
++            log.warn("[51job] AI配置读取失败: {}", e.getMessage());
++            return new AiGreetingResult(null, false, "ai_config_error", 0);
++        }
++    }
++
++    private boolean shouldRetryAiReason(String reason) {
++        return reason != null
++                && !reason.equals("ai_rejected")
++                && !reason.equals("ai_prompt_error")
++                && !reason.equals("ai_prompt_missing");
++    }
++
++    private boolean isRetryableAiFailure(Throwable error) {
++        String message = messageOf(error, "").toLowerCase(Locale.ROOT);
++        return !message.contains("状态码: 400")
++                && !message.contains("状态码: 401")
++                && !message.contains("状态码: 403")
++                && !message.contains("状态码: 404")
++                && !message.contains("状态码: 422");
++    }
++
++    private String classifyAiFailure(Throwable error) {
++        String message = messageOf(error, "").toLowerCase(Locale.ROOT);
++        if (message.contains("timed out") || message.contains("timeout")) return "ai_timeout";
++        if (message.contains("状态码: 400") || message.contains("状态码: 401")
++                || message.contains("状态码: 403") || message.contains("状态码: 404")
++                || message.contains("状态码: 422")) return "ai_request_rejected";
++        return "ai_request_error";
++    }
++
++    private void waitForAiRetry() {
++        try {
++            Thread.sleep(300L);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
+         }
+     }
+ 
+     static AiGreetingResult classifyAiResponse(String result) {
+-        if (result == null) return new AiGreetingResult(null, false);
++        if (result == null) return new AiGreetingResult(null, false, "ai_empty", 1);
+         String normalized = result.trim();
+-        if (normalized.isBlank()) return new AiGreetingResult(null, false);
+-        if (normalized.equalsIgnoreCase("false")) return new AiGreetingResult(null, true);
++        if (normalized.isBlank()) return new AiGreetingResult(null, false, "ai_empty", 1);
++        if (normalized.equalsIgnoreCase("false")) return new AiGreetingResult(null, true, "ai_rejected", 1);
+         String message = normalized.replaceAll("^```(?:text)?\\s*|\\s*```$", "").trim();
+-        return message.isBlank() ? new AiGreetingResult(null, false) : new AiGreetingResult(message, false);
++        return message.isBlank()
++                ? new AiGreetingResult(null, false, "ai_empty", 1)
++                : new AiGreetingResult(message, false, null, 1);
+     }
+ 
+     static boolean isUsableAiGreeting(AiGreetingResult result) {
+@@ -836,7 +1036,16 @@ public class Job51 {
+         return false;
+     }
+ 
+-    record AiGreetingResult(String message, boolean rejected) {
++    record AiGreetingResult(String message, boolean rejected, String reason, int attempts) {
++        AiGreetingResult(String message, boolean rejected) {
++            this(message, rejected, rejected ? "ai_rejected" : null, 1);
++        }
++    }
++
++    record JobDescriptionResult(String text, String source, String reason) {
++        boolean usable() {
++            return text != null && !text.isBlank() && "ok".equals(reason);
++        }
+     }
+ 
+     private enum AiJobOutcome {
+@@ -1266,8 +1475,13 @@ public class Job51 {
+      * 检查是否需要登录
+      */
+     private boolean checkNeedLogin() {
++        return checkNeedLogin(page);
++    }
++
++    private boolean checkNeedLogin(Page target) {
+         try {
+-            Locator loginElement = page.locator("//a[contains(@class, 'uname')]");
++            if (target == null) return false;
++            Locator loginElement = target.locator("//a[contains(@class, 'uname')]");
+             if (loginElement.count() > 0) {
+                 String text = loginElement.textContent();
+                 return text != null && text.contains("登录");
+@@ -1318,10 +1532,15 @@ public class Job51 {
+      * 检查是否出现访问验证
+      */
+     private boolean checkAccessVerification() {
++        return checkAccessVerification(page);
++    }
++
++    private boolean checkAccessVerification(Page target) {
+         try {
+-            Locator wafTitle = page.locator("//p[@class='waf-nc-title']");
+-            Locator wafScript = page.locator("script[name^='aliyunwaf_']");
+-            Locator verifyText = page.locator("text=访问验证, text=请按住滑块");
++            if (target == null) return false;
++            Locator wafTitle = target.locator("//p[@class='waf-nc-title']");
++            Locator wafScript = target.locator("script[name^='aliyunwaf_']");
++            Locator verifyText = target.locator("text=访问验证, text=请按住滑块");
+             if ((wafTitle.count() > 0 && wafTitle.first().isVisible()) || wafScript.count() > 0 || verifyText.count() > 0) {
+                 log.error("出现访问验证，需要手动处理");
+                 return true;
+@@ -1554,47 +1773,48 @@ public class Job51 {
+      * 从JSON文本中提取jobId列表
+      */
+     private List<Long> extractJobIdsFromJson(String json) {
+-        List<Long> jobIds = new ArrayList<>();
+-        if (json == null || json.trim().isEmpty()) {
+-            return jobIds;
+-        }
+-        
++        return extractJobIdsFromJsonText(json);
++    }
++
++    static List<Long> extractJobIdsFromJsonText(String json) {
++        java.util.LinkedHashSet<Long> jobIds = new java.util.LinkedHashSet<>();
++        if (json == null || json.trim().isEmpty()) return new ArrayList<>();
+         try {
+             com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+             com.fasterxml.jackson.databind.JsonNode root = mapper.readTree(json);
+-            
+-            // 兼容多种列表命名
+-            com.fasterxml.jackson.databind.JsonNode list = root.path("data").path("items");
+-            if (!list.isArray()) list = root.path("data").path("jobList");
+-            if (!list.isArray()) list = root.path("data").path("list");
+-            if (!list.isArray()) list = root.path("data").path("jobs");
+-            if (!list.isArray()) list = root.path("resultbody").path("job").path("items");
+-            if (!list.isArray()) list = root.path("job").path("items");
+-            if (!list.isArray()) list = root.path("resultbody").path("items");
+-            
+-            if (!list.isArray()) {
+-                return jobIds;
+-            }
+-            
+-            // 提取每个jobId
+-            for (com.fasterxml.jackson.databind.JsonNode item : list) {
+-                com.fasterxml.jackson.databind.JsonNode jobIdNode = item.path("jobId");
+-                if (!jobIdNode.isMissingNode() && !jobIdNode.isNull()) {
++            collectJobIds(root, jobIds, 0);
++        } catch (Exception e) {
++            log.warn("[51job] 解析JSON提取jobId失败: {}", e.getMessage());
++        }
++        return new ArrayList<>(jobIds);
++    }
++
++    private static void collectJobIds(com.fasterxml.jackson.databind.JsonNode node,
++                                      java.util.Set<Long> jobIds, int depth) {
++        if (node == null || node.isNull() || depth > 12) return;
++        if (node.isObject()) {
++            java.util.Iterator<java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode>> fields = node.fields();
++            while (fields.hasNext()) {
++                java.util.Map.Entry<String, com.fasterxml.jackson.databind.JsonNode> field = fields.next();
++                String key = field.getKey().toLowerCase(Locale.ROOT).replaceAll("[_-]", "");
++                com.fasterxml.jackson.databind.JsonNode value = field.getValue();
++                if (key.equals("jobid") || key.equals("jobidstr")) {
+                     try {
+-                        Long jobId = jobIdNode.asLong();
+-                        if (jobId != null && jobId > 0) {
+-                            jobIds.add(jobId);
++                        String text = value.asText(null);
++                        if (text != null) {
++                            long parsed = Long.parseLong(text.trim());
++                            if (parsed > 0) jobIds.add(parsed);
+                         }
+-                    } catch (Exception e) {
+-                        // 忽略单个解析失败
++                    } catch (Exception ignored) {
+                     }
++                } else {
++                    collectJobIds(value, jobIds, depth + 1);
+                 }
+             }
+-            
+-        } catch (Exception e) {
+-            log.warn("[51job] 解析JSON提取jobId失败: {}", e.getMessage());
++        } else if (node.isArray()) {
++            for (com.fasterxml.jackson.databind.JsonNode child : node) {
++                collectJobIds(child, jobIds, depth + 1);
++            }
+         }
+-        
+-        return jobIds;
+     }
+ }
+diff --git a/src/main/java/com/getjobs/worker/job51/Job51Locators.java b/src/main/java/com/getjobs/worker/job51/Job51Locators.java
+index 49e5908..82d6cbd 100644
+--- a/src/main/java/com/getjobs/worker/job51/Job51Locators.java
++++ b/src/main/java/com/getjobs/worker/job51/Job51Locators.java
+@@ -9,15 +9,24 @@ public final class Job51Locators {
+     }
+ 
+     public static final String[] DESCRIPTION_SELECTORS = {
++            "#job_desc",
++            "#job-description",
++            "[id*='job-desc']",
++            "[data-testid*='job-description']",
++            ".job-sec-text",
++            "[class*='job-sec-text']",
++            ".tCompany_main .job-intro",
+             ".job-detail",
+             ".job-detail-content",
+             ".job-detail-main",
++            ".job-description",
+             "[class*='job-intro']",
+             "[class*='job-description']",
+             "[class*='job-detail']",
+             "[class*='job-duty']",
+             ".job-intro-container",
+-            ".job-intro"
++            ".job-intro",
++            ".job-intro-container .job-intro"
+     };
+ 
+     public static final String[] JOB_CARD_SELECTORS = {
+diff --git a/src/test/java/com/getjobs/application/service/AiPromptTest.java b/src/test/java/com/getjobs/application/service/AiPromptTest.java
+index 206c0cd..1a0710d 100644
+--- a/src/test/java/com/getjobs/application/service/AiPromptTest.java
++++ b/src/test/java/com/getjobs/application/service/AiPromptTest.java
+@@ -108,4 +108,32 @@ class AiPromptTest {
+         assertFalse(rejected.usable());
+         assertTrue(rejected.rejected());
+     }
++
++    @Test
++    void extractsGreetingFromCommonJsonEnvelope() {
++        AiService.GreetingValidation result = AiService.validateGreeting(
++                "{\"items\":[{\"message\":\"您好，我是应用物理学应届毕业生，熟悉设备现场支持，期待沟通。\"}]}",
++                "个人介绍");
++
++        assertTrue(result.usable());
++        assertEquals("ok", result.reason());
++    }
++
++    @Test
++    void extractsTextFromResponsesApiOutputBlocks() {
++        String content = AiService.extractResponseContent(
++                "{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"您好，我是应用物理学应届毕业生，熟悉设备支持，期待沟通。\"}]}]}",
++                "https://api.example.test/v1/responses");
++
++        assertEquals("您好，我是应用物理学应届毕业生，熟悉设备支持，期待沟通。", content);
++    }
++
++    @Test
++    void acceptsTopLevelJsonArrayGreeting() {
++        AiService.GreetingValidation result = AiService.validateGreeting(
++                "[{\"text\":\"您好，我是应用物理学应届毕业生，熟悉现场支持，期待沟通。\"}]",
++                "个人介绍");
++
++        assertTrue(result.usable());
++    }
+ }
+diff --git a/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java b/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java
+new file mode 100644
+index 0000000..51a02dd
+--- /dev/null
++++ b/src/test/java/com/getjobs/application/service/Job51SearchJsonTest.java
+@@ -0,0 +1,45 @@
++package com.getjobs.application.service;
++
++import com.getjobs.application.entity.Job51Entity;
++import org.junit.jupiter.api.Test;
++
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++
++class Job51SearchJsonTest {
++
++    @Test
++    void parsesNestedJobSnapshotIncludingDescriptionAndLink() {
++        List<Job51Entity> result = Job51Service.parseSearchEntities("""
++                {"data":{"items":[
++                  {"job":{"jobId":"1001","jobName":"应用工程师","jobDescription":"负责设备现场支持与客户培训","jobHref":"//example.test/job/1001"},
++                   "company":{"companyId":"88","companyName":"示例公司"},"hrName":"招聘专员"},
++                  {"jobId":1002,"title":"测试工程师","description":"负责测试方案与问题跟踪"}
++                ]}}
++                """);
++
++        assertEquals(2, result.size());
++        assertEquals(1001L, result.get(0).getJobId());
++        assertEquals("应用工程师", result.get(0).getJobTitle());
++        assertEquals("负责设备现场支持与客户培训", result.get(0).getJobDescription());
++        assertEquals("//example.test/job/1001", result.get(0).getJobLink());
++        assertEquals(88L, result.get(0).getCompId());
++        assertEquals("示例公司", result.get(0).getCompName());
++        assertEquals("招聘专员", result.get(0).getHrName());
++        assertEquals(1002L, result.get(1).getJobId());
++        assertNotNull(result.get(1).getJobLink());
++    }
++
++    @Test
++    void acceptsTopLevelListAndFallbackGeneratedLink() {
++        List<Job51Entity> result = Job51Service.parseSearchEntities(
++                "{\"list\":[{\"job_id\":2001,\"jobTitle\":\"设备支持\",\"jobDesc\":\"现场支持与维护\"}]}"
++        );
++
++        assertEquals(1, result.size());
++        assertEquals(2001L, result.get(0).getJobId());
++        assertEquals("https://we.51job.com/pc/jobdetail?jobId=2001", result.get(0).getJobLink());
++    }
++}
+diff --git a/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java b/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
+index 8f8c3b6..791446e 100644
+--- a/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
++++ b/src/test/java/com/getjobs/worker/job51/Job51BehaviorTest.java
+@@ -48,6 +48,15 @@ class Job51BehaviorTest {
+         assertEquals("您好，关注到贵司岗位，希望有机会交流。", result.message());
+     }
+ 
++    @Test
++    void extractsJobIdsFromTopLevelAndNestedSearchItems() {
++        assertEquals(
++                java.util.List.of(1001L, 1002L, 1003L),
++                Job51.extractJobIdsFromJsonText(
++                        "{\"data\":{\"items\":[{\"job\":{\"jobId\":\"1001\"}},{\"jobInfo\":{\"job_id\":1002}}]},"
++                                + "\"list\":[{\"jobId\":1003},{\"jobId\":1001}]}"));
++    }
++
+     @Test
+     void aiConfigValuesAreClampedToApprovedBounds() {
+         Job51Config config = new Job51Config();

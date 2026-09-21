@@ -1,0 +1,133 @@
+diff --git "a/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java" "b/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java"
+index 55fd55d..16198d0 100644
+--- "a/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java"
++++ "b/src/main/java/com/getjobs/worker/liepin/LiepinRateGuard.java"
+@@ -130,6 +130,13 @@ final class LiepinRateGuard {
+         }
+ 
+         long remaining = lastActivityAt + delaySeconds * 1000L - now;
++        if (remaining <= 0) {
++            lastActivityAt = now;
++            info.accept(String.format("节奏控制：%s间隔已满足，无需额外等待", label));
++            return true;
++        }
++
++        info.accept(String.format("节奏控制：%s开始等待%d秒", label, delaySeconds));
+         while (remaining > 0) {
+             if (!isActive()) return false;
+             try {
+@@ -142,8 +149,9 @@ final class LiepinRateGuard {
+             }
+             remaining = lastActivityAt + delaySeconds * 1000L - clock.getAsLong();
+         }
++        if (!isActive()) return false;
+         lastActivityAt = clock.getAsLong();
+-        info.accept(String.format("节奏控制：%s等待%d秒后继续", label, delaySeconds));
++        info.accept(String.format("节奏控制：%s等待结束，继续处理", label));
+         return true;
+     }
+ 
+diff --git "a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java" "b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java"
+index 94130d9..f847e32 100644
+--- "a/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java"
++++ "b/src/test/java/com/getjobs/worker/liepin/LiepinRateGuardTest.java"
+@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.concurrent.atomic.AtomicLong;
++import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertFalse;
+@@ -22,7 +23,67 @@ class LiepinRateGuardTest {
+         assertTrue(guard.before(LiepinRateGuard.Action.PAGE));
+ 
+         assertEquals(15_000L, now.get());
+-        assertTrue(messages.stream().anyMatch(message -> message.contains("翻页等待15秒")));
++        assertTrue(messages.contains("节奏控制：翻页开始等待15秒"));
++        assertTrue(messages.contains("节奏控制：翻页等待结束，继续处理"));
++    }
++
++    @Test
++    void publishesWaitingBeforeSleepingAndCompletionAfterClockAdvances() {
++        AtomicLong now = new AtomicLong(0);
++        List<String> events = new ArrayList<>();
++        LiepinRateGuard guard = newGuard(now, events, millis -> {
++            events.add("sleep:" + millis);
++            now.addAndGet(millis);
++        }, message -> events.add("message:" + message));
++
++        assertTrue(guard.before(LiepinRateGuard.Action.SEARCH));
++        assertTrue(guard.before(LiepinRateGuard.Action.PAGE));
++
++        int startIndex = events.indexOf("message:节奏控制：翻页开始等待15秒");
++        int endIndex = events.indexOf("message:节奏控制：翻页等待结束，继续处理");
++        assertTrue(startIndex >= 0);
++        assertTrue(endIndex > startIndex + 1);
++        assertTrue(events.get(startIndex + 1).startsWith("sleep:"));
++        assertEquals(15_000L, events.subList(startIndex + 1, endIndex).stream()
++                .mapToLong(event -> Long.parseLong(event.substring("sleep:".length())))
++                .sum());
++    }
++
++    @Test
++    void reportsSatisfiedIntervalWithoutClaimingAnotherWait() {
++        AtomicLong now = new AtomicLong(0);
++        List<String> messages = new ArrayList<>();
++        LiepinRateGuard guard = newGuard(now, messages);
++
++        assertTrue(guard.before(LiepinRateGuard.Action.SEARCH));
++        now.set(20_000L);
++
++        assertTrue(guard.before(LiepinRateGuard.Action.PAGE));
++        assertEquals(20_000L, now.get());
++        assertTrue(messages.contains("节奏控制：翻页间隔已满足，无需额外等待"));
++        assertFalse(messages.stream().anyMatch(message -> message.contains("翻页开始等待")));
++    }
++
++    @Test
++    void stopDuringWaitPreventsTheActionFromContinuing() {
++        AtomicLong now = new AtomicLong(0);
++        AtomicBoolean shouldStop = new AtomicBoolean(false);
++        List<String> messages = new ArrayList<>();
++        LiepinRateGuard guard = new LiepinRateGuard(
++                shouldStop::get,
++                messages::add,
++                now::get,
++                millis -> {
++                    shouldStop.set(true);
++                    now.addAndGet(millis);
++                },
++                (min, max) -> min,
++                new LiepinRateGuard.DelayRange(90, 180)
++        );
++
++        assertTrue(guard.before(LiepinRateGuard.Action.SEARCH));
++        assertFalse(guard.before(LiepinRateGuard.Action.PAGE));
++        assertTrue(messages.contains("节奏控制：翻页开始等待15秒"));
+     }
+ 
+     @Test
+@@ -64,11 +125,20 @@ class LiepinRateGuardTest {
+     }
+ 
+     private LiepinRateGuard newGuard(AtomicLong now, List<String> messages) {
++        return newGuard(now, messages, now::addAndGet, messages::add);
++    }
++
++    private LiepinRateGuard newGuard(
++            AtomicLong now,
++            List<String> messages,
++            LiepinRateGuard.Sleeper sleeper,
++            java.util.function.Consumer<String> info
++    ) {
+         return new LiepinRateGuard(
+                 () -> false,
+-                messages::add,
++                info,
+                 now::get,
+-                millis -> now.addAndGet(millis),
++                sleeper,
+                 (min, max) -> min,
+                 new LiepinRateGuard.DelayRange(90, 180)
+         );

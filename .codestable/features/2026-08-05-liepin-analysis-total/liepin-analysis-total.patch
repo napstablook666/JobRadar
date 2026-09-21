@@ -1,0 +1,29 @@
+diff --git a/front/app/liepin/analysis/AnalysisContent.tsx b/front/app/liepin/analysis/AnalysisContent.tsx
+index 5ec5c30..c8aadf0 100644
+--- a/front/app/liepin/analysis/AnalysisContent.tsx
++++ b/front/app/liepin/analysis/AnalysisContent.tsx
+@@ -234,8 +234,8 @@ export default function AnalysisContent({ showHeader = false }: { showHeader?: b
+   const [inputPage, setInputPage] = useState<number | string>(1)
+   const [inputSize, setInputSize] = useState<number | string>(20)
+ 
+-  // 默认先看真实已投递记录；取消“已投递”后仍可切换回完整岗位池。
+-  const [statuses, setStatuses] = useState<string[]>(["已投递"])
++  // 默认进入分析页查看完整岗位池；手动应用状态后再按筛选结果统计。
++  const [statuses, setStatuses] = useState<string[]>([])
+   const [location, setLocation] = useState<string>("")
+   const [experience, setExperience] = useState<string>("")
+   const [degree, setDegree] = useState<string>("")
+
+diff --git a/进度白板.md b/进度白板.md
+index 325c861..65d3a03 100644
+--- a/进度白板.md
++++ b/进度白板.md
+@@ -16,7 +16,7 @@
+ ✅ 已完成：真实 AI 话术复测 —— 本轮确认可用 AI 话术，聊天窗口实际出现 AI 招呼语和简历卡片，卡片包含“在线简历/附件简历”，岗位状态更新为已投递。
+ ✅ 已完成：AI话术自动发简历 —— AI话术确认成功后自动点击“发简历”和“立即投递”，并以聊天新增本人简历消息作为成功依据。
+ ✅ 已完成：猎聘 AI 投递相关度闸门 —— AI 开启时，缺 JD、无关岗位、AI false、空话术和请求异常均在点击聊天前跳过，不再发送平台预设语。
+-✅ 已完成：猎聘分析默认口径 —— 分析页首次请求带 `statuses=已投递`，取消状态筛选后仍可查看完整岗位池。
++✅ 已完成：猎聘分析默认口径 —— 分析页首次请求不带状态筛选并显示完整岗位池，手动应用状态后按筛选结果统计。
+ ✅ 已完成：本轮回归验证 —— Java 全量测试、前端生产构建和已投递统计接口验证通过。
+ 🔨 正在做：无。
+ ⬜ 还没做：无。

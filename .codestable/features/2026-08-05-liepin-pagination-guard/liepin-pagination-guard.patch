@@ -1,0 +1,79 @@
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index a811385..caa0944 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -285,13 +285,21 @@ public class Liepin {
+     private void submit(String keyword) {
+         // 清洗关键词：去掉前后引号与多余空白
+         String cleanKeyword = keyword == null ? "" : keyword.replace("\"", "").trim();
+-        page.navigate(getSearchUrl() + "&key=" + cleanKeyword);
+-        
+-        // 等待分页元素加载
+-        page.waitForSelector(PAGINATION_BOX, new Page.WaitForSelectorOptions().setTimeout(10000));
+-        Locator paginationBox = page.locator(PAGINATION_BOX);
+-        Locator lis = paginationBox.locator("li");
+-        setMaxPage(lis);
++        navigateAndCaptureSearchResponse(getSearchUrl() + "&key=" + cleanKeyword);
++
++        if (!waitForSearchResults()) {
++            info(String.format("【%s】搜索结果未加载出岗位卡片，跳过本次关键词", cleanKeyword));
++            return;
++        }
++
++        // 分页控件只决定是否继续翻页，不作为搜索结果加载成功的必要条件。
++        maxPage = 1;
++        Locator paginationBox = findPaginationBox();
++        if (paginationBox != null) {
++            setMaxPage(paginationBox.locator("li"));
++        } else {
++            info(String.format("【%s】未发现分页控件，按当前结果页处理", cleanKeyword));
++        }
+         
+         for (int i = 0; i < maxPage; i++) {
+             if (shouldStop()) {
+@@ -319,7 +327,10 @@ public class Liepin {
+             info(String.format("已投递第【%d】页所有的岗位...", i + 1));
+             
+             // 查找下一页按钮（AntD v5 结构）
+-            paginationBox = page.locator(PAGINATION_BOX);
++            paginationBox = findPaginationBox();
++            if (paginationBox == null) {
++                break;
++            }
+             Locator nextLi = paginationBox.locator(NEXT_PAGE);
+             if (nextLi.count() > 0) {
+                 String cls = nextLi.first().getAttribute("class");
+@@ -341,6 +352,33 @@ public class Liepin {
+         info(String.format("【%s】关键词投递完成！", cleanKeyword));
+     }
+ 
++    /** 等待搜索结果卡片或任一分页变体出现；单页结果可以没有分页控件。 */
++    private boolean waitForSearchResults() {
++        long deadline = System.currentTimeMillis() + 15000L;
++        while (System.currentTimeMillis() < deadline) {
++            try {
++                if (page.locator(JOB_CARDS).count() > 0 || findPaginationBox() != null) {
++                    return true;
++                }
++            } catch (Exception e) {
++                log.debug("检查猎聘搜索结果状态失败: {}", e.getMessage());
++                return false;
++            }
++            page.waitForTimeout(200);
++        }
++        return false;
++    }
++
++    private Locator findPaginationBox() {
++        String[] selectors = {PAGINATION_BOX, ".ant-pagination", "ul.ant-pagination"};
++        for (String selector : selectors) {
++            Locator candidate = page.locator(selector);
++            if (candidate.count() > 0) {
++                return candidate.first();
++            }
++        }
++        return null;
++    }
+ 
+     /**
+      * 搜索导航必须把动作和响应等待放在同一个 Playwright 调用中，避免异步 response 回调跨线程读取正文。

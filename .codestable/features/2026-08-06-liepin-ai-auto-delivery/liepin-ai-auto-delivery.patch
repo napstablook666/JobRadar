@@ -1,0 +1,520 @@
+diff --git a/src/main/java/com/getjobs/worker/liepin/Liepin.java b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+index 6b8b438..6bcdfa1 100644
+--- a/src/main/java/com/getjobs/worker/liepin/Liepin.java
++++ b/src/main/java/com/getjobs/worker/liepin/Liepin.java
+@@ -363,6 +363,9 @@ public class Liepin {
+         if (minDelay < 0 || maxDelay < minDelay || maxDelay > 300) {
+             throw new IllegalArgumentException("猎聘随机等待需满足 0<=最小秒数<=最大秒数<=300");
+         }
++        if (config.isAutoAiDeliveryEnabled() && !config.isAiEnabled()) {
++            throw new IllegalArgumentException("开启AI自动投递前，请先开启AI招呼语");
++        }
+     }
+ 
+     private void info(String msg) {
+@@ -890,16 +893,32 @@ public class Liepin {
+                     info(String.format("【%s】【%s】未读取到JD，直接跳过，未发送平台预设语", companyName, jobName));
+                     continue;
+                 }
+-                if (!isRelevantJob(jobName, jd)) {
+-                    info(String.format("【%s】【%s】标题或JD与目标医疗设备方向不相关，直接跳过", companyName, jobName));
+-                    continue;
+-                }
+-
+-                aiResult = generateAiGreeting(keyword, jobName, jd);
+-                if (!isUsableAiGreeting(aiResult)) {
+-                    String reason = aiResult != null && aiResult.rejected() ? "AI判定不匹配" : "AI未生成有效话术";
+-                    info(String.format("【%s】【%s】%s，直接跳过，未发送平台预设语", companyName, jobName, reason));
+-                    continue;
++                if (config.isAutoAiDeliveryEnabled()) {
++                    // 自动模式交给结构化评分，避免旧的硬编码关键词或 FALSE 招呼语漏掉可尝试岗位。
++                    LiepinAiAssessment assessment = generateAiAssessment(keyword, jobName, jd, "");
++                    if (assessment == null) {
++                        info(String.format("【%s】【%s】AI评分结果无效，直接跳过", companyName, jobName));
++                        continue;
++                    }
++                    info(String.format("【%s】【%s】AI评分%d/100：%s",
++                            companyName, jobName, assessment.score(), assessment.reason()));
++                    if (!passesAutoAiScreening(config, assessment)) {
++                        info(String.format("【%s】【%s】AI评分低于%d分，跳过自动投递",
++                                companyName, jobName, config.effectiveAiMinScore()));
++                        continue;
++                    }
++                    aiResult = new AiGreetingResult(assessment.message(), false);
++                } else {
++                    if (!isRelevantJob(jobName, jd)) {
++                        info(String.format("【%s】【%s】标题或JD与目标医疗设备方向不相关，直接跳过", companyName, jobName));
++                        continue;
++                    }
++                    aiResult = generateAiGreeting(keyword, jobName, jd);
++                    if (!isUsableAiGreeting(aiResult)) {
++                        String reason = aiResult != null && aiResult.rejected() ? "AI判定不匹配" : "AI未生成有效话术";
++                        info(String.format("【%s】【%s】%s，直接跳过，未发送平台预设语", companyName, jobName, reason));
++                        continue;
++                    }
+                 }
+             }
+ 
+@@ -908,9 +927,14 @@ public class Liepin {
+                     aiResult.message() != null ? aiResult.message() : "猎聘App预设语",
+                     aiResult.message() != null
+             );
+-            GreetingAction action = greetingConfirmation == null
+-                    ? GreetingAction.SKIP
+-                    : greetingConfirmation.confirm(greetingRequest);
++            GreetingAction action;
++            if (config.isAutoAiDeliveryEnabled()) {
++                action = GreetingAction.SEND_AI;
++            } else {
++                action = greetingConfirmation == null
++                        ? GreetingAction.SKIP
++                        : greetingConfirmation.confirm(greetingRequest);
++            }
+             if (action == null || action == GreetingAction.SKIP || shouldStop()) {
+                 info(String.format("已跳过【%s】【%s】", companyName, jobName));
+                 continue;
+@@ -1068,6 +1092,29 @@ public class Liepin {
+         }
+     }
+ 
++    private LiepinAiAssessment generateAiAssessment(String keyword, String jobName, String jd, String greeting) {
++        try {
++            AiEntity aiConfig = aiService.getAiConfig();
++            String introduce = aiConfig == null || aiConfig.getIntroduce() == null ? "" : aiConfig.getIntroduce();
++            String request = """
++                    你是一个严格的求职岗位匹配评分器。请根据候选人简介、搜索关键词、岗位名称、岗位JD和参考招呼语，判断这个岗位是否值得尝试投递。
++                    评分范围是0到100：岗位职责、候选人经历和方向越匹配，分数越高；明显无关岗位应给低分。
++                    只返回一个JSON对象，不要Markdown代码块，不要额外解释。字段必须完整：
++                    {"score":整数,"reason":"不超过80字的中文理由","message":"可直接发送的简短中文招呼语"}
++
++                    候选人简介：%s
++                    搜索关键词：%s
++                    岗位名称：%s
++                    岗位JD：%s
++                    参考招呼语：%s
++                    """.formatted(introduce, keyword, jobName, jd, greeting);
++            return LiepinAiAssessment.parse(aiService.sendRequest(request));
++        } catch (Exception e) {
++            log.warn("猎聘AI评分请求失败，将跳过当前岗位: {}", e.getMessage());
++            return null;
++        }
++    }
++
+     static AiGreetingResult classifyAiResponse(String result) {
+         if (result == null) return new AiGreetingResult(null, false);
+         String normalized = result.trim();
+@@ -1084,6 +1131,13 @@ public class Liepin {
+                 && !result.message().isBlank();
+     }
+ 
++    static boolean passesAutoAiScreening(LiepinConfig config, LiepinAiAssessment assessment) {
++        return config != null
++                && config.isAutoAiDeliveryEnabled()
++                && assessment != null
++                && assessment.passes(config.effectiveAiMinScore());
++    }
++
+     static boolean isRelevantJob(String jobTitle, String jd) {
+         String title = normalizeMatchText(jobTitle);
+         String description = normalizeMatchText(jd);
+
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+index 50ae3a4..21c5dcb 100644
+--- a/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinConfig.java
+@@ -15,6 +15,9 @@ public class LiepinConfig {
+     public static final int MIN_SAFE_SEND_DELAY_SECONDS = 90;
+     public static final int DEFAULT_MIN_DELAY_SECONDS = 90;
+     public static final int DEFAULT_MAX_DELAY_SECONDS = 180;
++    public static final int DEFAULT_AI_MIN_SCORE = 70;
++    public static final int MIN_AI_SCORE = 0;
++    public static final int MAX_AI_SCORE = 100;
+ 
+     /**
+      * 搜索关键词列表
+@@ -34,6 +37,12 @@ public class LiepinConfig {
+     /** 是否启用逐岗位 AI 招呼语 */
+     private Boolean enableAI = true;
+ 
++    /** 是否启用 AI 评分通过后自动投递 */
++    private Boolean autoAiDelivery = false;
++
++    /** 自动投递的最低 AI 评分 */
++    private Integer aiMinScore = DEFAULT_AI_MIN_SCORE;
++
+     /** 单次任务最多处理的合格岗位数 */
+     private Integer maxPerRun = DEFAULT_MAX_PER_RUN;
+ 
+@@ -47,6 +56,15 @@ public class LiepinConfig {
+         return enableAI == null || enableAI;
+     }
+ 
++    public boolean isAutoAiDeliveryEnabled() {
++        return Boolean.TRUE.equals(autoAiDelivery);
++    }
++
++    public int effectiveAiMinScore() {
++        int score = aiMinScore == null ? DEFAULT_AI_MIN_SCORE : aiMinScore;
++        return Math.max(MIN_AI_SCORE, Math.min(MAX_AI_SCORE, score));
++    }
++
+     public int effectiveMaxPerRun() {
+         return Math.min(maxPerRun == null ? DEFAULT_MAX_PER_RUN : maxPerRun,
+                 MAX_SAFE_PER_RUN);
+
+diff --git a/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java b/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+index 14f9272..3b39850 100644
+--- a/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
++++ b/src/main/java/com/getjobs/application/entity/LiepinConfigEntity.java
+@@ -26,6 +26,12 @@ public class LiepinConfigEntity {
+     /** 是否启用 AI 招呼语（1=启用，0=关闭） */
+     private Integer enableAi;
+ 
++    /** 是否启用 AI 评分通过后自动投递（1=启用，0=关闭） */
++    private Integer autoAiDelivery;
++
++    /** 自动投递最低 AI 评分（0-100） */
++    private Integer aiMinScore;
++
+     /** 单次任务最多处理岗位数 */
+     private Integer maxPerRun;
+
+diff --git a/src/main/java/com/getjobs/application/service/ConfigService.java b/src/main/java/com/getjobs/application/service/ConfigService.java
+index 8f0ca2d..f013f5e 100644
+--- a/src/main/java/com/getjobs/application/service/ConfigService.java
++++ b/src/main/java/com/getjobs/application/service/ConfigService.java
+@@ -246,6 +246,10 @@ public class ConfigService {
+         }
+ 
+         config.setEnableAI(entity == null || entity.getEnableAi() == null || entity.getEnableAi() != 0);
++        config.setAutoAiDelivery(entity != null && entity.getAutoAiDelivery() != null
++                && entity.getAutoAiDelivery() != 0);
++        config.setAiMinScore(entity == null || entity.getAiMinScore() == null
++                ? LiepinConfig.DEFAULT_AI_MIN_SCORE : entity.getAiMinScore());
+         config.setMaxPerRun(entity == null || entity.getMaxPerRun() == null
+                 ? LiepinConfig.DEFAULT_MAX_PER_RUN : entity.getMaxPerRun());
+         config.setMinDelaySeconds(entity == null || entity.getMinDelaySeconds() == null
+
+diff --git a/src/main/java/com/getjobs/application/service/LiepinService.java b/src/main/java/com/getjobs/application/service/LiepinService.java
+index fbea811..5c533f5 100644
+--- a/src/main/java/com/getjobs/application/service/LiepinService.java
++++ b/src/main/java/com/getjobs/application/service/LiepinService.java
+@@ -76,6 +76,12 @@ public class LiepinService {
+             try {
+                 stmt.execute("ALTER TABLE liepin_config ADD COLUMN enable_ai INTEGER DEFAULT 1");
+             } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN auto_ai_delivery INTEGER DEFAULT 0");
++            } catch (Exception ignored) {}
++            try {
++                stmt.execute("ALTER TABLE liepin_config ADD COLUMN ai_min_score INTEGER DEFAULT 70");
++            } catch (Exception ignored) {}
+             try {
+                 stmt.execute("ALTER TABLE liepin_config ADD COLUMN max_per_run INTEGER DEFAULT 10");
+             } catch (Exception ignored) {}
+@@ -456,6 +462,12 @@ public class LiepinService {
+         if (config.getEnableAi() != null) {
+             existing.setEnableAi(config.getEnableAi());
+         }
++        if (config.getAutoAiDelivery() != null) {
++            existing.setAutoAiDelivery(config.getAutoAiDelivery());
++        }
++        if (config.getAiMinScore() != null) {
++            existing.setAiMinScore(config.getAiMinScore());
++        }
+         if (config.getMaxPerRun() != null) {
+             existing.setMaxPerRun(config.getMaxPerRun());
+         }
+@@ -474,6 +486,11 @@ public class LiepinService {
+     private void applyDeliveryDefaults(LiepinConfigEntity config) {
+         if (config == null) return;
+         if (config.getEnableAi() == null) config.setEnableAi(1);
++        if (config.getAutoAiDelivery() == null) config.setAutoAiDelivery(0);
++        if (config.getAiMinScore() == null) config.setAiMinScore(LiepinConfig.DEFAULT_AI_MIN_SCORE);
++        config.setAutoAiDelivery(config.getAutoAiDelivery() == 0 ? 0 : 1);
++        config.setAiMinScore(Math.max(LiepinConfig.MIN_AI_SCORE,
++                Math.min(LiepinConfig.MAX_AI_SCORE, config.getAiMinScore())));
+         if (config.getMaxPerRun() == null) config.setMaxPerRun(LiepinConfig.DEFAULT_MAX_PER_RUN);
+         if (config.getMinDelaySeconds() == null) config.setMinDelaySeconds(LiepinConfig.DEFAULT_MIN_DELAY_SECONDS);
+         if (config.getMaxDelaySeconds() == null) config.setMaxDelaySeconds(LiepinConfig.DEFAULT_MAX_DELAY_SECONDS);
+
+diff --git a/front/app/liepin/page.tsx b/front/app/liepin/page.tsx
+index 1a7b927..a52af39 100644
+--- a/front/app/liepin/page.tsx
++++ b/front/app/liepin/page.tsx
+@@ -18,6 +18,8 @@ interface LiepinConfig {
+   city?: string
+   salaryCode?: string
+   enableAi?: number
++  autoAiDelivery?: number
++  aiMinScore?: number
+   maxPerRun?: number
+   minDelaySeconds?: number
+   maxDelaySeconds?: number
+@@ -60,6 +62,8 @@ export default function LiepinPage() {
+     city: '',
+     salaryCode: '',
+     enableAi: 1,
++    autoAiDelivery: 0,
++    aiMinScore: 70,
+     maxPerRun: 10,
+     minDelaySeconds: 90,
+     maxDelaySeconds: 180,
+@@ -178,6 +182,8 @@ export default function LiepinPage() {
+         const normalized = { ...data.config }
+         normalized.keywords = parseKeywordsFromDb(data.config.keywords)
+         normalized.enableAi = data.config.enableAi === 0 ? 0 : 1
++        normalized.autoAiDelivery = data.config.autoAiDelivery === 1 ? 1 : 0
++        normalized.aiMinScore = Math.max(0, Math.min(100, data.config.aiMinScore ?? 70))
+         normalized.maxPerRun = Math.min(data.config.maxPerRun ?? 10, 10)
+         normalized.minDelaySeconds = Math.max(data.config.minDelaySeconds ?? 90, 90)
+         normalized.maxDelaySeconds = Math.max(data.config.maxDelaySeconds ?? 180, normalized.minDelaySeconds, 180)
+@@ -604,7 +610,7 @@ export default function LiepinPage() {
+               <BiTargetLock className="text-primary" />
+               AI 投递控制
+             </CardTitle>
+-            <CardDescription>逐岗位读取 JD，生成消息后等待确认；搜索、详情和发送统一节奏控制</CardDescription>
++            <CardDescription>逐岗位读取 JD；关闭自动投递时等待确认，开启后按 AI 评分阈值自动发送</CardDescription>
+           </CardHeader>
+           <CardContent>
+             <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+@@ -615,11 +621,41 @@ export default function LiepinPage() {
+                     id="enableAi"
+                     type="checkbox"
+                     checked={config.enableAi !== 0}
+-                    onChange={(e) => setConfig({ ...config, enableAi: e.target.checked ? 1 : 0 })}
++                    onChange={(e) => setConfig({
++                      ...config,
++                      enableAi: e.target.checked ? 1 : 0,
++                      autoAiDelivery: e.target.checked ? config.autoAiDelivery : 0,
++                    })}
+                   />
+                   <span>{config.enableAi !== 0 ? '已开启' : '已关闭，使用猎聘预设语'}</span>
+                 </label>
+               </div>
++              <div className="space-y-2">
++                <Label htmlFor="autoAiDelivery">AI筛选自动投递</Label>
++                <label className="flex h-10 items-center gap-3 rounded-md border px-3 text-sm">
++                  <input
++                    id="autoAiDelivery"
++                    type="checkbox"
++                    disabled={config.enableAi === 0}
++                    checked={config.autoAiDelivery === 1}
++                    onChange={(e) => setConfig({ ...config, autoAiDelivery: e.target.checked ? 1 : 0 })}
++                  />
++                  <span>{config.autoAiDelivery === 1 ? '已开启，评分达标自动发送' : '已关闭，逐岗位等待确认'}</span>
++                </label>
++              </div>
++              <div className="space-y-2">
++                <Label htmlFor="aiMinScore">AI最低评分</Label>
++                <Input
++                  id="aiMinScore"
++                  type="number"
++                  min={0}
++                  max={100}
++                  disabled={config.autoAiDelivery !== 1}
++                  value={config.aiMinScore ?? 70}
++                  onChange={(e) => setConfig({ ...config, aiMinScore: Number(e.target.value) })}
++                />
++                <p className="text-xs text-muted-foreground">评分达到该分数才自动发送，默认 70 分。</p>
++              </div>
+               <div className="space-y-2">
+                 <Label htmlFor="maxPerRun">单次岗位上限</Label>
+                 <Input
+
+diff --git a/进度白板.md b/进度白板.md
+index 0c8570f..14d76dc 100644
+--- a/进度白板.md
++++ b/进度白板.md
+@@ -29,6 +29,7 @@
+ ✅ 已完成：51job运行复测 —— 启动接口、成功计数、停止接口和最终任务收尾均已实测通过。
+ ✅ 已完成：猎聘零成功计数修复 —— 只有聊天确认成功才计入投递数，零成功时显示“本轮未成功发起聊天”，并补充回归测试与回滚产物。
+ ✅ 已完成：清理未投递岗位统计记录 —— 删除 3397 条未投递历史记录，保留 21 条已投递记录，统计接口返回 pending=0。
++✅ 已完成：猎聘 AI 筛选自动投递 —— 新增默认关闭的评分自动投递开关、最低评分配置和严格 JSON 评分闸门，保留人工确认模式。
+ ✅ 已完成：投递间歇提示时序修复 —— 等待开始、等待结束和无需额外等待分别展示，页面提示与真实节奏同步。
+ ✅ 已完成：51job AI逐岗位打招呼 —— 默认关闭，开启后逐岗位读取JD、生成AI文案并自动发送，无效文案或缺少JD时跳过。
+ ✅ 已完成：51job AI参数与状态 —— 页面支持开关、单次上限和随机间隔，分析列表显示打招呼状态，运行接口回传计数。
+
+diff --git a/src/main/java/com/getjobs/worker/liepin/LiepinAiAssessment.java b/src/main/java/com/getjobs/worker/liepin/LiepinAiAssessment.java
+new file mode 100644
+index 0000000..1ed6792
+--- /dev/null
++++ b/src/main/java/com/getjobs/worker/liepin/LiepinAiAssessment.java
+@@ -0,0 +1,87 @@
++package com.getjobs.worker.liepin;
++
++import org.json.JSONObject;
++import org.json.JSONTokener;
++
++/**
++ * AI 自动投递评分结果。只接受结构完整、分数在 0-100 之间的 JSON。
++ */
++public record LiepinAiAssessment(int score, String reason, String message) {
++
++    public static LiepinAiAssessment parse(String raw) {
++        if (raw == null || raw.isBlank()) {
++            return null;
++        }
++
++        String json = stripMarkdownFence(raw.trim());
++        if (!json.startsWith("{") || !json.endsWith("}")) {
++            return null;
++        }
++
++        try {
++            JSONTokener tokenizer = new JSONTokener(json);
++            Object parsed = tokenizer.nextValue();
++            if (tokenizer.nextClean() != 0) {
++                return null;
++            }
++            if (!(parsed instanceof JSONObject object)) {
++                return null;
++            }
++
++            Integer score = readScore(object.opt("score"));
++            String reason = readText(object.opt("reason"));
++            String message = readText(object.opt("message"));
++            if (score == null || score < 0 || score > 100 || reason == null || message == null) {
++                return null;
++            }
++            return new LiepinAiAssessment(score, reason, message);
++        } catch (RuntimeException ignored) {
++            return null;
++        }
++    }
++
++    public boolean passes(int minimumScore) {
++        return score >= minimumScore;
++    }
++
++    private static String stripMarkdownFence(String raw) {
++        if (!raw.startsWith("```")) {
++            return raw;
++        }
++        int firstLineEnd = raw.indexOf('\n');
++        if (firstLineEnd < 0) {
++            return "";
++        }
++        String content = raw.substring(firstLineEnd + 1).trim();
++        if (content.endsWith("```")) {
++            content = content.substring(0, content.length() - 3).trim();
++        }
++        return content;
++    }
++
++    private static Integer readScore(Object value) {
++        if (value instanceof Number number) {
++            double numeric = number.doubleValue();
++            if (!Double.isFinite(numeric) || numeric != Math.rint(numeric)) {
++                return null;
++            }
++            return (int) numeric;
++        }
++        if (value instanceof String text && text.matches("\\d{1,3}")) {
++            try {
++                return Integer.parseInt(text);
++            } catch (NumberFormatException ignored) {
++                return null;
++            }
++        }
++        return null;
++    }
++
++    private static String readText(Object value) {
++        if (!(value instanceof String text)) {
++            return null;
++        }
++        String normalized = text.trim();
++        return normalized.isEmpty() ? null : normalized;
++    }
++}
+
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinAiAssessmentTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinAiAssessmentTest.java
+new file mode 100644
+index 0000000..c5a7bb6
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinAiAssessmentTest.java
+@@ -0,0 +1,49 @@
++package com.getjobs.worker.liepin;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++import static org.junit.jupiter.api.Assertions.assertNull;
++import static org.junit.jupiter.api.Assertions.assertTrue;
++
++class LiepinAiAssessmentTest {
++
++    @Test
++    void parsesCompleteJsonAssessment() {
++        LiepinAiAssessment assessment = LiepinAiAssessment.parse(
++                "{\"score\":85,\"reason\":\"方向和经验匹配\",\"message\":\"您好，我对这个岗位很感兴趣。\"}");
++
++        assertEquals(85, assessment.score());
++        assertEquals("方向和经验匹配", assessment.reason());
++        assertEquals("您好，我对这个岗位很感兴趣。", assessment.message());
++    }
++
++    @Test
++    void acceptsJsonInsideMarkdownFence() {
++        LiepinAiAssessment assessment = LiepinAiAssessment.parse(
++                "```json\n{\"score\":70,\"reason\":\"基本匹配\",\"message\":\"您好，期待交流。\"}\n```");
++
++        assertEquals(70, assessment.score());
++        assertTrue(assessment.passes(70));
++    }
++
++    @Test
++    void rejectsIncompleteOrOutOfRangeResponse() {
++        assertNull(LiepinAiAssessment.parse("{\"score\":101,\"reason\":\"太高\",\"message\":\"您好\"}"));
++        assertNull(LiepinAiAssessment.parse("{\"score\":80,\"reason\":\"缺少话术\"}"));
++        assertNull(LiepinAiAssessment.parse("{\"score\":80,\"reason\":\"有余\",\"message\":\"您好\"} extra"));
++    }
++
++    @Test
++    void autoScreeningRequiresSwitchAndConfiguredThreshold() {
++        LiepinConfig config = new LiepinConfig();
++        LiepinAiAssessment assessment = new LiepinAiAssessment(70, "达到阈值", "您好");
++
++        assertFalse(Liepin.passesAutoAiScreening(config, assessment));
++        config.setAutoAiDelivery(true);
++        assertTrue(Liepin.passesAutoAiScreening(config, assessment));
++        config.setAiMinScore(71);
++        assertFalse(Liepin.passesAutoAiScreening(config, assessment));
++    }
++}
+
+diff --git a/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java b/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java
+new file mode 100644
+index 0000000..f0a0a69
+--- /dev/null
++++ b/src/test/java/com/getjobs/worker/liepin/LiepinConfigTest.java
+@@ -0,0 +1,27 @@
++package com.getjobs.worker.liepin;
++
++import org.junit.jupiter.api.Test;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.junit.jupiter.api.Assertions.assertFalse;
++
++class LiepinConfigTest {
++
++    @Test
++    void autoDeliveryIsOffByDefaultAndScoreDefaultsToSeventy() {
++        LiepinConfig config = new LiepinConfig();
++
++        assertFalse(config.isAutoAiDeliveryEnabled());
++        assertEquals(70, config.effectiveAiMinScore());
++    }
++
++    @Test
++    void scoreIsClampedToValidRange() {
++        LiepinConfig config = new LiepinConfig();
++
++        config.setAiMinScore(-1);
++        assertEquals(0, config.effectiveAiMinScore());
++        config.setAiMinScore(101);
++        assertEquals(100, config.effectiveAiMinScore());
++    }
++}

@@ -1,0 +1,46 @@
+APP delivery-stall validation record
+Date: 2026-08-06
+
+Root cause confirmed from live DOM:
+- The current page uses one visible batch button: button.p_but.all_apply.
+- The success feedback is a visible .el-dialog with text "投递成功!" and no numeric count.
+- The previous handler required numeric text, returned 0, and raised "点击批量投递后未确认成功结果".
+
+Baseline SHA256:
+- Job51.java: 64A39BE2B98D09A40C262623D9CFC70EFBCA37B9DFF331B4944AF58A3CC3DAEE
+- Job51JobService.java: AF413266AD54181A5E394447D39879628AFC77FC05329249B0C428789AEF1727
+- PlaywrightManager.java: FF01C2EB1E37B12DC964CC58367EC759F872EF0E69A709248FE766D4062C6142
+
+Build and unit verification:
+Command: $env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'; .\gradlew.bat compileJava compileTestJava test --tests com.getjobs.worker.job51.Job51BehaviorTest
+Exit code: 0
+Literal output:
+BUILD SUCCESSFUL in 14s
+5 actionable tasks: 4 executed, 1 up-to-date
+
+Live verification:
+Command: Invoke-RestMethod -Method Post -Uri http://localhost:8888/api/51job/start
+Exit code: 0
+Literal output: {"success":true,"message":"51job任务启动成功","status":"started"}
+Observed polling: 14:14:59 running=True delivered=0; 14:15:17 running=True delivered=20.
+Command: Invoke-RestMethod -Method Post -Uri http://localhost:8888/api/51job/stop
+Exit code: 0
+Literal output: {"success":true,"message":"51job任务停止请求已发送"}
+Final status: {"isRunning":false,"success":true,"isLoggedIn":true,"platform":"51job"}
+Final KPI: {"total":57,"delivered":20,"pending":37,"filtered":0,"failed":0,"avgMonthlyK":7.24}
+Relevant log: 投递结果：成功 20 个；批量标记已投递完成，入参 20 条，成功更新 20 条；投递已停止，已确认成功20个职位。
+
+Rollback verification in isolated staging root:
+Command: rollback-app-delivery-stall.ps1 -Root target/local-run/rollback-check-20260806
+Exit code: 0
+Literal output:
+RESTORED src\main\java\com\getjobs\worker\job51\Job51.java
+RESTORED src\main\java\com\getjobs\worker\service\Job51JobService.java
+RESTORED src\main\java\com\getjobs\worker\manager\PlaywrightManager.java
+REMOVED src\test\java\com\getjobs\worker\job51\Job51BehaviorTest.java
+HASH_MATCH Job51.java=True
+HASH_MATCH Job51JobService.java=True
+HASH_MATCH PlaywrightManager.java=True
+TEST_EXISTS=False
+
+Patch SHA256: 889B57E9CF99BCD29BCBD40D870BA531E18AEA7B4A0BB3B693C9A1B5CF844636
